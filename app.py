@@ -89,7 +89,7 @@ def load_proxies():
     if CONFIG.get("proxies"):
         proxies.extend([p.strip() for p in CONFIG["proxies"].split("\n") if p.strip()])
         
-    # 2. Proxys aus URL (z.B. Geonode API)
+    # 2. Proxys aus URL (z.B. GitHub oder Geonode API)
     api_url = CONFIG.get("proxy_url", "").strip()
     if api_url:
         try:
@@ -107,7 +107,15 @@ def load_proxies():
                         proxies.append(f"{proto}://{ip}:{port}")
             else:
                 found = re.findall(r'[0-9]+(?:\.[0-9]+){3}:[0-9]+', resp.text)
-                proxies.extend([f"http://{p}" for p in found])
+                
+                # NEU: Fehlerbehebung! Prüft am Link, welches Protokoll gebraucht wird
+                protocol = "http"
+                if "socks5" in api_url.lower():
+                    protocol = "socks5"
+                elif "socks4" in api_url.lower():
+                    protocol = "socks4"
+                    
+                proxies.extend([f"{protocol}://{p}" for p in found])
                 
         except Exception as e:
             print(f"Fehler beim Proxy-Download: {e}")
@@ -165,21 +173,10 @@ def check_item(driver, item):
     body_text = body_text.replace("0 stück", "xxx").replace("momentan nicht", "xxx")
     
     keywords = [
-        "in den warenkorb",
-        "lieferung möglich",
-        "im markt verfügbar",
-        "märkten verfügbar",
-        "stück verfügbar",
-        "stück auf lager",
-        "stück vorrätig",
-        "reservieren & abholen",
-        "marktabholung",
-        "abholung im markt",
-        "abholbereit",
-        "zur abholung",
-        "markt abholbar",
-        "märkten abholbar",
-        "filiale verfügbar"
+        "in den warenkorb", "lieferung möglich", "im markt verfügbar", "märkten verfügbar",
+        "stück verfügbar", "stück auf lager", "stück vorrätig", "reservieren & abholen",
+        "marktabholung", "abholung im markt", "abholbereit", "zur abholung", 
+        "markt abholbar", "märkten abholbar", "filiale verfügbar"
     ]
     
     for keyword in keywords:
@@ -206,34 +203,31 @@ def tracker_loop():
             
             for item in CONFIG["items"]:
                 if stop_event.is_set(): break
-                
-                if time.time() - item.get("found_time", 0) <= 86400:
-                    continue
+                if time.time() - item.get("found_time", 0) <= 86400: continue
                     
                 item["last_check"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                 
-                # Check ob Proxy zwingend benötigt wird
                 if CONFIG.get("require_proxy") and not proxy_pool:
                     item["status"] = "⚠️ Fehler: Kein Proxy vorhanden!"
                     save_config()
                     continue
                 
-                max_retries = 3
+                # NEU: 10 Versuche! Er rattert jetzt durch die Liste, bis einer klappt.
+                max_retries = 10
                 success = False
                 
                 for attempt in range(max_retries):
                     if stop_event.is_set(): break
                     
                     current_proxy = random.choice(proxy_pool) if proxy_pool else None
-                    
-                    # Wenn Proxy zwingend ist, aber zufällig None zurückkam, abbrechen
-                    if CONFIG.get("require_proxy") and not current_proxy:
-                        continue
+                    if CONFIG.get("require_proxy") and not current_proxy: continue
                         
                     STATE["current_proxy"] = current_proxy if current_proxy else "Lokale Server-IP (Kein Proxy)"
                     
                     driver = setup_driver(current_proxy)
-                    driver.set_page_load_timeout(20) 
+                    
+                    # NEU: FAIL-FAST. Nach 12 Sekunden stürzt der Proxy ab und der nächste wird getestet.
+                    driver.set_page_load_timeout(12) 
                     
                     try:
                         is_available = check_item(driver, item)
@@ -252,13 +246,12 @@ def tracker_loop():
                         break 
                         
                     except Exception as e:
-                        print(f"Proxy kaputt/Timeout ({current_proxy}) - Versuche nächsten...")
                         driver.quit()
                         if current_proxy and current_proxy in proxy_pool:
                             proxy_pool.remove(current_proxy)
                 
                 if not success:
-                    item["status"] = "⚠️ Fehler (Proxys kaputt)"
+                    item["status"] = "⚠️ Fehler (Alle 10 Proxys tot)"
                     save_config()
                 
         STATE["status"] = f"Warte {CONFIG['interval']} Min..."
@@ -291,7 +284,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Status-Feld mit aktivem Proxy -->
     <div class="alert alert-{{ 'success' if state.is_running else 'secondary' }} d-flex justify-content-between align-items-center shadow-sm">
         <div>
             <div><strong>System-Status:</strong> {{ state.status }}</div>
@@ -404,9 +396,9 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div class="mb-3">
-                    <label class="form-label text-primary"><strong>Proxy API URL (z.B. von Geonode)</strong></label>
-                    <input type="url" name="proxy_url" class="form-control" value="{{ config.proxy_url|default('', true) }}" placeholder="https://proxylist.geonode.com/api/proxy-list?...">
-                    <div class="form-text">Der Bot lädt vor jedem Durchgang live die Proxys von dieser URL herunter und ignoriert defekte IPs.</div>
+                    <label class="form-label text-primary"><strong>Proxy API URL (z.B. GitHub)</strong></label>
+                    <input type="url" name="proxy_url" class="form-control" value="{{ config.proxy_url|default('', true) }}" placeholder="https://raw.githubusercontent.com/...">
+                    <div class="form-text">Der Bot lädt vor jedem Durchgang live die Proxys von dieser URL herunter und probiert bis zu 10 Stück aus.</div>
                 </div>
 
                 <div class="mb-3">
@@ -514,7 +506,7 @@ def stop():
 
 @app.route("/test")
 def test_push():
-    send_pushover("Dies ist eine Test-Nachricht. Die Verbindung klappt!", "https://google.com")
+    send_pushover("Dies ist eine Test-Nachricht.", "https://google.com")
     return redirect(url_for("index"))
 
 if __name__ == "__main__":
