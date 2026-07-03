@@ -90,7 +90,6 @@ def check_item(driver, item):
         driver.get(item["url"])
         time.sleep(5) 
         
-        # 1. Cookie Banner wegklicken
         try:
             cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
             driver.execute_script("arguments[0].click();", cookie_btn)
@@ -98,11 +97,9 @@ def check_item(driver, item):
         except:
             pass
 
-        # 2. Leicht nach unten scrollen (lädt manchmal versteckte Elemente nach)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
         time.sleep(2)
 
-        # 3. Aggressiv nach jedem Button suchen, der die Filialen öffnet
         try:
             buttons = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a")
             for btn in buttons:
@@ -111,36 +108,40 @@ def check_item(driver, item):
                     driver.execute_script("arguments[0].scrollIntoView(true);", btn)
                     time.sleep(1)
                     driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(4) # Warten, bis Popup offen ist
+                    time.sleep(4) 
                     break
         except:
             pass
             
-        # NEU: LIVE-KAMERA - Wir machen IMMER ein Foto, um zu sehen, ob das Popup offen ist!
         debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
         driver.save_screenshot(debug_path)
         
-        body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        raw_text = driver.find_element(By.TAG_NAME, "body").text.lower()
         
-        # Falschmeldungen filtern
+        # NEU: Das ist der Gamechanger! 
+        # Macht aus "1 Stück\nverfügbar" -> "1 stück verfügbar"
+        body_text = " ".join(raw_text.split())
+        
         body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx")
         body_text = body_text.replace("in keinem markt", "xxx").replace("nicht reservierbar", "xxx")
         body_text = body_text.replace("0 stück", "xxx").replace("momentan nicht", "xxx")
         
-        # Erweiterte Suchbegriffe für Filialen
         keywords = [
             "in den warenkorb",
             "lieferung möglich",
             "im markt verfügbar",
             "märkten verfügbar",
             "stück verfügbar",
+            "stück auf lager",
+            "stück vorrätig",
             "reservieren & abholen",
             "marktabholung",
             "abholung im markt",
             "abholbereit",
             "zur abholung",
             "markt abholbar",
-            "märkten abholbar"
+            "märkten abholbar",
+            "filiale verfügbar"
         ]
         
         for keyword in keywords:
@@ -259,7 +260,6 @@ HTML_TEMPLATE = """
                                 </a><br>
                             {% endif %}
                             
-                            <!-- NEU: LIVE KAMERA BUTTON -->
                             <a href="/debug/{{ item.id }}?t={{ time.time() }}" target="_blank" class="badge bg-info text-decoration-none py-2 px-3 mt-1 shadow-sm">
                                 📸 Bot-Kamera (Live)
                             </a>
@@ -353,13 +353,12 @@ def serve_screenshot(item_id):
         return send_file(img_path, mimetype='image/png')
     return "Kein Beweisbild gefunden", 404
 
-# NEU: LIVE-KAMERA ROUTE
 @app.route("/debug/<item_id>")
 def serve_debug(item_id):
     img_path = os.path.join(DATA_DIR, f"debug_{item_id}.png")
     if os.path.exists(img_path):
         return send_file(img_path, mimetype='image/png')
-    return "Der Bot hat diesen Artikel noch nicht gescannt. Bitte kurz warten.", 404
+    return "Der Bot hat diesen Artikel noch nicht gescannt.", 404
 
 @app.route("/start")
 def start():
