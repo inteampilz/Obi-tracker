@@ -1,10 +1,9 @@
 services:
   obi-tracker:
     build: .
-    image: obi-tracker:v2-multi  # 1. ERZWINGT ein komplett neues Image
-    container_name: obi_tracker_v2 # 2. Neuer Container-Name gegen Zombies
+    container_name: obi_tracker
     ports:
-      - "5001:5000"  # 3. WICHTIG: Port auf 5001 geändert!
+      - "5001:5000"
     volumes:
       - tracker_data:/app/data
     restart: unless-stopped
