@@ -6,16 +6,12 @@ RUN apt-get update && apt-get install -y \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
-# NEU: Ein anderer Ordnername, damit der Docker-Cache sofort platzt
-WORKDIR /app_v3
+WORKDIR /app
 
+# Wir kopieren NUR die requirements.txt, damit die Pakete installiert werden.
+# Die app.py wird später automatisch über die docker-compose live reingeladen!
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Ein Zeitstempel als ultimativer Cache-Brecher
-ENV BUILD_DATE="2026-07-03"
-
-COPY app.py .
 
 EXPOSE 5000
 
