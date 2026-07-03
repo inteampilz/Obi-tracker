@@ -5,6 +5,7 @@ import uuid
 import threading
 import requests
 import datetime
+import random
 from flask import Flask, request, render_template_string, redirect, url_for, send_file
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -20,6 +21,7 @@ CONFIG = {
     "pushover_user": os.getenv("PUSHOVER_USER_KEY", ""),
     "pushover_token": os.getenv("PUSHOVER_APP_TOKEN", ""),
     "interval": 15,
+    "proxies": "", # Speichert die Proxy-Liste als Text
     "items": []
 }
 
@@ -76,6 +78,7 @@ def send_pushover(message, item_url, image_path=None):
     except Exception as e:
         print(f"Pushover Fehler: {e}")
 
+# NEU: Konfiguriert den Chrome-Browser mit einem zufälligen Proxy aus deiner Liste
 def setup_driver():
     options = Options()
     options.add_argument("--headless")
@@ -83,6 +86,16 @@ def setup_driver():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+    
+    # Proxy-Logik integrieren
+    if CONFIG.get("proxies"):
+        # Zeilen aufsplitten und leere Zeilen entfernen
+        proxy_list = [p.strip() for p in CONFIG["proxies"].split("\n") if p.strip()]
+        if proxy_list:
+            selected_proxy = random.choice(proxy_list)
+            print(f"[PROXY] Nutze für diesen Check: {selected_proxy}")
+            options.add_argument(f"--proxy-server={selected_proxy}")
+            
     return webdriver.Chrome(options=options)
 
 def check_item(driver, item):
@@ -296,7 +309,7 @@ HTML_TEMPLATE = """
     </div>
 
     <div class="card shadow-sm">
-        <div class="card-header bg-secondary text-white">⚙️ System Einstellungen</div>
+        <div class="card-header bg-secondary text-white">⚙️ System Einstellungen & Proxys</div>
         <div class="card-body">
             <form action="/save_settings" method="POST">
                 <div class="row mb-3">
@@ -315,6 +328,13 @@ HTML_TEMPLATE = """
                         <input type="number" name="interval" class="form-control" value="{{ config.interval }}" min="1" required>
                     </div>
                 </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Proxys (Optional – Ein Proxy pro Zeile)</label>
+                    <textarea name="proxies" class="form-control font-monospace" rows="4" placeholder="Beispiel:&#10;http://123.45.67.89:8080&#10;http://user:password@proxy.example.com:3128">{{ config.proxies }}</textarea>
+                    <div class="form-text">Unterstützt normales HTTP/SOCKS sowie Proxys mit Benutzername/Passwort. Bleibt das Feld leer, läuft der Bot über deine normale Server-IP.</div>
+                </div>
+                
                 <div class="d-flex justify-content-between">
                     <button type="submit" class="btn btn-secondary">Einstellungen Speichern</button>
                     <a href="/test" class="btn btn-outline-info">Test-Benachrichtigung senden</a>
@@ -337,6 +357,7 @@ def save_settings():
     CONFIG["pushover_user"] = request.form["pushover_user"]
     CONFIG["pushover_token"] = request.form["pushover_token"]
     CONFIG["interval"] = int(request.form["interval"])
+    CONFIG["proxies"] = request.form["proxies"] # Speichert Proxys ab
     save_config()
     return redirect(url_for("index"))
 
