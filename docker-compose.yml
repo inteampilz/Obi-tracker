@@ -5,10 +5,8 @@ services:
     ports:
       - "5000:5000"
     volumes:
+      # Wir behalten nur das Volume für die Speicherdaten!
       - tracker_data:/app/data
-      # NEU: Diese Zeile reicht die Datei direkt durch. 
-      # Jede Änderung auf GitHub ist nach einem Neustart sofort aktiv!
-      - ./app.py:/app/app.py
     restart: unless-stopped
 
 volumes:
