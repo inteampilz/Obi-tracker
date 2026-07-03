@@ -7,9 +7,6 @@ services:
     ports:
       - "5005:5000"
     volumes:
-      # 1. Der Live-Mount: Lädt immer den neusten GitHub-Code in den Container!
-      - ./:/app
-      # 2. Das Daten-Volume: Schützt deine Screenshots und Keys vor dem Löschen
       - multitracker_data:/app/data
     restart: unless-stopped
 
