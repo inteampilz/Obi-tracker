@@ -1,12 +1,14 @@
+version: '3.8'
+
 services:
-  obi-tracker:
+  multitracker:
     build: .
-    container_name: obi_tracker
+    container_name: multitracker_app
     ports:
-      - "5001:5000"
+      - "5005:5000"  # NEU: Wir weichen auf Port 5005 aus
     volumes:
-      - tracker_data:/app/data
+      - multitracker_data:/app/data
     restart: unless-stopped
 
 volumes:
-  tracker_data:
+  multitracker_data:
