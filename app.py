@@ -16,7 +16,6 @@ DATA_DIR = "data"
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 config_lock = threading.Lock()
 
-# Globale Konfiguration
 CONFIG = {
     "pushover_user": os.getenv("PUSHOVER_USER_KEY", ""),
     "pushover_token": os.getenv("PUSHOVER_APP_TOKEN", ""),
@@ -32,7 +31,6 @@ STATE = {
 tracker_thread = None
 stop_event = threading.Event()
 
-# --- DATEN-VERWALTUNG ---
 def init_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
@@ -57,7 +55,6 @@ def save_config():
         with open(CONFIG_FILE, "w") as f:
             json.dump(CONFIG, f, indent=4)
 
-# --- PUSHOVER ---
 def send_pushover(message, item_url, image_path=None):
     try:
         data = {
@@ -79,7 +76,6 @@ def send_pushover(message, item_url, image_path=None):
     except Exception as e:
         print(f"Pushover Fehler: {e}")
 
-# --- TRACKER LOGIK (SELENIUM) ---
 def setup_driver():
     options = Options()
     options.add_argument("--headless")
@@ -92,9 +88,9 @@ def setup_driver():
 def check_item(driver, item):
     try:
         driver.get(item["url"])
-        time.sleep(5) # Warten bis die Seite und Preise geladen sind
+        time.sleep(5) 
         
-        # 1. TRICK: Cookie-Banner wegklicken (hilft, damit Buttons klickbar werden)
+        # 1. Cookie Banner wegklicken
         try:
             cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
             driver.execute_script("arguments[0].click();", cookie_btn)
@@ -102,43 +98,53 @@ def check_item(driver, item):
         except:
             pass
 
-        # 2. TRICK: Filial-Liste aufklappen!
+        # 2. Leicht nach unten scrollen (lädt manchmal versteckte Elemente nach)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+        time.sleep(2)
+
+        # 3. Aggressiv nach jedem Button suchen, der die Filialen öffnet
         try:
-            # Sucht nach dem Link/Button, der die anderen OBI-Märkte anzeigt
-            market_buttons = driver.find_elements(By.XPATH, "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'markt') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'filiale')]")
-            for btn in market_buttons:
+            buttons = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a")
+            for btn in buttons:
                 text = btn.text.lower()
-                if "prüfen" in text or "anderen" in text or "wählen" in text or "verfügbarkeit" in text or "ändern" in text:
+                if "märkten" in text or "verfügbarkeit" in text or "filiale" in text:
+                    driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                    time.sleep(1)
                     driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(3) # Warten, bis das Popup mit allen Filialen geladen ist
+                    time.sleep(4) # Warten, bis Popup offen ist
                     break
         except:
             pass
             
-        # 3. Den gesamten sichtbaren Text der Seite (inklusive aufgeklapptem Popup) auslesen
+        # NEU: LIVE-KAMERA - Wir machen IMMER ein Foto, um zu sehen, ob das Popup offen ist!
+        debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
+        driver.save_screenshot(debug_path)
+        
         body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
         
-        # 4. TRICK: Falschmeldungen aussortieren
+        # Falschmeldungen filtern
         body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx")
         body_text = body_text.replace("in keinem markt", "xxx").replace("nicht reservierbar", "xxx")
+        body_text = body_text.replace("0 stück", "xxx").replace("momentan nicht", "xxx")
         
-        # GANZ WICHTIG: Wenn eine Filiale "0 Stück" hat, machen wir das unschädlich!
-        body_text = body_text.replace("0 stück", "xxx")
-        
-        # 5. Finale Prüfung nach positiven Signalen (Online ODER Filiale)
+        # Erweiterte Suchbegriffe für Filialen
         keywords = [
-            "in den warenkorb",       # Online verfügbar
-            "lieferung möglich",      # Online lieferbar
-            "im markt verfügbar",     # Filiale hat generellen Bestand
-            "stück verfügbar",        # Löst aus, wenn es NICHT 0 Stück sind (da 0 oben ersetzt wurde)
-            "reservieren & abholen",  # Filial-Verfügbarkeit
+            "in den warenkorb",
+            "lieferung möglich",
+            "im markt verfügbar",
+            "märkten verfügbar",
+            "stück verfügbar",
+            "reservieren & abholen",
             "marktabholung",
-            "abholung im markt"
+            "abholung im markt",
+            "abholbereit",
+            "zur abholung",
+            "markt abholbar",
+            "märkten abholbar"
         ]
         
         for keyword in keywords:
             if keyword in body_text:
-                # Wir haben einen Treffer in einer Filiale oder Online!
                 screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                 driver.save_screenshot(screenshot_path)
                 item["has_screenshot"] = True
@@ -146,7 +152,6 @@ def check_item(driver, item):
                 return True
                 
         return False
-        
     except Exception as e:
         print(f"Fehler bei {item['name']}: {e}")
         return False
@@ -188,7 +193,6 @@ def tracker_loop():
         STATE["status"] = f"Warte {CONFIG['interval']} Min..."
         stop_event.wait(CONFIG["interval"] * 60)
 
-# --- WEB UI HTML ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="de">
@@ -231,7 +235,7 @@ HTML_TEMPLATE = """
                         <th>Produkt</th>
                         <th>Status</th>
                         <th>Letzter Check</th>
-                        <th>Beweis</th>
+                        <th>Beweis & Kamera</th>
                         <th class="text-end">Aktion</th>
                     </tr>
                 </thead>
@@ -246,19 +250,19 @@ HTML_TEMPLATE = """
                             <span class="badge {{ 'bg-success' if 'VERFÜGBAR' in item.status else 'bg-secondary' }}">
                                 {{ item.status }}
                             </span>
-                            {% if item.found_time and (time.time() - item.found_time) < 86400 %}
-                                <br><small class="text-warning">Auf 24h-Cooldown</small>
-                            {% endif %}
                         </td>
                         <td class="small">{{ item.last_check }}</td>
                         <td>
                             {% if item.has_screenshot %}
                                 <a href="/screenshot/{{ item.id }}?t={{ item.screenshot_time }}" target="_blank">
-                                    <img src="/screenshot/{{ item.id }}?t={{ item.screenshot_time }}" class="screenshot-thumb img-thumbnail">
-                                </a>
-                            {% else %}
-                                <span class="text-muted small">Kein Bild</span>
+                                    <img src="/screenshot/{{ item.id }}?t={{ item.screenshot_time }}" class="screenshot-thumb img-thumbnail mb-1">
+                                </a><br>
                             {% endif %}
+                            
+                            <!-- NEU: LIVE KAMERA BUTTON -->
+                            <a href="/debug/{{ item.id }}?t={{ time.time() }}" target="_blank" class="badge bg-info text-decoration-none py-2 px-3 mt-1 shadow-sm">
+                                📸 Bot-Kamera (Live)
+                            </a>
                         </td>
                         <td class="text-end">
                             {% if item.found_time and (time.time() - item.found_time) < 86400 %}
@@ -269,7 +273,7 @@ HTML_TEMPLATE = """
                     </tr>
                     {% else %}
                     <tr>
-                        <td colspan="5" class="text-center py-4 text-muted">Keine Artikel angelegt. Füge unten einen hinzu!</td>
+                        <td colspan="5" class="text-center py-4 text-muted">Keine Artikel angelegt.</td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -282,10 +286,10 @@ HTML_TEMPLATE = """
         <div class="card-body">
             <form action="/add" method="POST" class="row g-2">
                 <div class="col-md-4">
-                    <input type="text" name="name" class="form-control" placeholder="Produktname (z.B. PortaSplit)" required>
+                    <input type="text" name="name" class="form-control" placeholder="Produktname" required>
                 </div>
                 <div class="col-md-6">
-                    <input type="url" name="url" class="form-control" placeholder="Komplette URL (https://...)" required>
+                    <input type="url" name="url" class="form-control" placeholder="https://..." required>
                 </div>
                 <div class="col-md-2">
                     <button type="submit" class="btn btn-primary w-100">Hinzufügen</button>
@@ -293,41 +297,11 @@ HTML_TEMPLATE = """
             </form>
         </div>
     </div>
-
-    <div class="card shadow-sm">
-        <div class="card-header bg-secondary text-white">⚙️ System Einstellungen</div>
-        <div class="card-body">
-            <form action="/save_settings" method="POST">
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label">Pushover User Key</label>
-                        <input type="text" name="pushover_user" class="form-control" value="{{ config.pushover_user }}" required>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label">Pushover App Token</label>
-                        <input type="text" name="pushover_token" class="form-control" value="{{ config.pushover_token }}" required>
-                    </div>
-                </div>
-                <div class="row mb-3">
-                    <div class="col-md-6">
-                        <label class="form-label">Prüf-Intervall (Minuten)</label>
-                        <input type="number" name="interval" class="form-control" value="{{ config.interval }}" min="1" required>
-                    </div>
-                </div>
-                <div class="d-flex justify-content-between">
-                    <button type="submit" class="btn btn-secondary">Einstellungen Speichern</button>
-                    <a href="/test" class="btn btn-outline-info">Test-Benachrichtigung senden</a>
-                </div>
-            </form>
-        </div>
-    </div>
-
 </div>
 </body>
 </html>
 """
 
-# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE, config=CONFIG, state=STATE, time=time)
@@ -358,11 +332,6 @@ def add_item():
 @app.route("/delete/<item_id>")
 def delete_item(item_id):
     CONFIG["items"] = [item for item in CONFIG["items"] if item["id"] != item_id]
-    
-    img_path = os.path.join(DATA_DIR, f"screenshot_{item_id}.png")
-    if os.path.exists(img_path):
-        os.remove(img_path)
-        
     save_config()
     return redirect(url_for("index"))
 
@@ -372,7 +341,7 @@ def reset_cooldown(item_id):
         if item["id"] == item_id:
             item["found_time"] = 0
             item["status"] = "Wartet auf Check..."
-            item["has_screenshot"] = False  # Entfernt auch das alte Screenshot-Bild in der UI
+            item["has_screenshot"] = False
             save_config()
             break
     return redirect(url_for("index"))
@@ -382,7 +351,15 @@ def serve_screenshot(item_id):
     img_path = os.path.join(DATA_DIR, f"screenshot_{item_id}.png")
     if os.path.exists(img_path):
         return send_file(img_path, mimetype='image/png')
-    return "Kein Screenshot gefunden", 404
+    return "Kein Beweisbild gefunden", 404
+
+# NEU: LIVE-KAMERA ROUTE
+@app.route("/debug/<item_id>")
+def serve_debug(item_id):
+    img_path = os.path.join(DATA_DIR, f"debug_{item_id}.png")
+    if os.path.exists(img_path):
+        return send_file(img_path, mimetype='image/png')
+    return "Der Bot hat diesen Artikel noch nicht gescannt. Bitte kurz warten.", 404
 
 @app.route("/start")
 def start():
@@ -404,7 +381,7 @@ def stop():
 
 @app.route("/test")
 def test_push():
-    send_pushover("Dies ist eine Test-Nachricht. Die Verbindung klappt!", "https://google.com")
+    send_pushover("Dies ist eine Test-Nachricht.", "https://google.com")
     return redirect(url_for("index"))
 
 if __name__ == "__main__":
