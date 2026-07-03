@@ -16,12 +16,11 @@ DATA_DIR = "data"
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 config_lock = threading.Lock()
 
-# Standard-Konfiguration
 CONFIG = {
     "pushover_user": os.getenv("PUSHOVER_USER_KEY", ""),
     "pushover_token": os.getenv("PUSHOVER_APP_TOKEN", ""),
     "interval": 15,
-    "items": [] # Hier landen die verschiedenen Artikel
+    "items": []
 }
 
 STATE = {
@@ -32,7 +31,6 @@ STATE = {
 tracker_thread = None
 stop_event = threading.Event()
 
-# --- DATEN-VERWALTUNG ---
 def init_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
@@ -57,7 +55,6 @@ def save_config():
         with open(CONFIG_FILE, "w") as f:
             json.dump(CONFIG, f, indent=4)
 
-# --- PUSHOVER ---
 def send_pushover(message, item_url, image_path=None):
     try:
         data = {
@@ -79,7 +76,6 @@ def send_pushover(message, item_url, image_path=None):
     except Exception as e:
         print(f"Pushover Fehler: {e}")
 
-# --- TRACKER LOGIK ---
 def setup_driver():
     options = Options()
     options.add_argument("--headless")
@@ -92,7 +88,7 @@ def setup_driver():
 def check_item(driver, item):
     try:
         driver.get(item["url"])
-        time.sleep(5) # Warten bis JS geladen ist
+        time.sleep(5)
         
         body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
         
@@ -118,7 +114,6 @@ def tracker_loop():
     while not stop_event.is_set():
         STATE["status"] = "Prüfe Artikel..."
         
-        # Prüfen ob überhaupt Artikel da sind, die nicht gerade im 24h-Cooldown sind
         needs_check = False
         for item in CONFIG["items"]:
             if time.time() - item.get("found_time", 0) > 86400:
@@ -130,7 +125,6 @@ def tracker_loop():
                 for item in CONFIG["items"]:
                     if stop_event.is_set(): break
                     
-                    # Überspringen, wenn in den letzten 24h schon gefunden
                     if time.time() - item.get("found_time", 0) <= 86400:
                         continue
                         
@@ -139,13 +133,13 @@ def tracker_loop():
                     is_available = check_item(driver, item)
                     if is_available:
                         item["status"] = "✅ VERFÜGBAR!"
-                        item["found_time"] = time.time() # Löst den 24h Cooldown aus
+                        item["found_time"] = time.time()
                         img_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                         send_pushover(f"🚨 ALARM! {item['name']} ist verfügbar!", item["url"], img_path)
                     else:
                         item["status"] = "❌ Nicht verfügbar."
                         
-                    save_config() # Status nach jedem Artikel speichern
+                    save_config()
                     
             finally:
                 driver.quit()
@@ -153,7 +147,6 @@ def tracker_loop():
         STATE["status"] = f"Warte {CONFIG['interval']} Min..."
         stop_event.wait(CONFIG["interval"] * 60)
 
-# --- WEB UI HTML ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="de">
@@ -180,16 +173,14 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Status Banner -->
     <div class="alert alert-{{ 'success' if state.is_running else 'secondary' }} d-flex justify-content-between">
         <span><strong>System-Status:</strong> {{ state.status }}</span>
         <span>Tracker ist <strong>{{ 'AKTIV' if state.is_running else 'GESTOPPT' }}</strong></span>
     </div>
 
-    <!-- Tracking Liste -->
     <div class="card shadow-sm mb-4">
         <div class="card-header bg-dark text-white">
-            <h5 class="mb-0">📦 Überwachte Artikel ({{ config.items|length }})</h5>
+            <h5 class="mb-0">📦 Überwachte Artikel ({{ config['items']|length }})</h5>
         </div>
         <div class="card-body p-0">
             <table class="table table-hover mb-0">
@@ -203,7 +194,7 @@ HTML_TEMPLATE = """
                     </tr>
                 </thead>
                 <tbody>
-                    {% for item in config.items %}
+                    {% for item in config['items'] %}
                     <tr>
                         <td>
                             <strong>{{ item.name }}</strong><br>
@@ -244,13 +235,12 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Neuer Artikel Formular -->
     <div class="card shadow-sm mb-4 border-primary">
         <div class="card-header bg-primary text-white">➕ Neuen Artikel hinzufügen</div>
         <div class="card-body">
             <form action="/add" method="POST" class="row g-2">
                 <div class="col-md-4">
-                    <input type="text" name="name" class="form-control" placeholder="Produktname (z.B. Midea PortaSplit)" required>
+                    <input type="text" name="name" class="form-control" placeholder="Produktname (z.B. PortaSplit)" required>
                 </div>
                 <div class="col-md-6">
                     <input type="url" name="url" class="form-control" placeholder="Komplette URL (https://...)" required>
@@ -262,7 +252,6 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- System Einstellungen -->
     <div class="card shadow-sm">
         <div class="card-header bg-secondary text-white">⚙️ System Einstellungen</div>
         <div class="card-body">
@@ -296,7 +285,6 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE, config=CONFIG, state=STATE, time=time)
@@ -328,7 +316,6 @@ def add_item():
 def delete_item(item_id):
     CONFIG["items"] = [item for item in CONFIG["items"] if item["id"] != item_id]
     
-    # Screenshot aufräumen falls vorhanden
     img_path = os.path.join(DATA_DIR, f"screenshot_{item_id}.png")
     if os.path.exists(img_path):
         os.remove(img_path)
