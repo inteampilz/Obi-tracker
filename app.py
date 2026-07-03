@@ -117,9 +117,6 @@ def check_item(driver, item):
         driver.save_screenshot(debug_path)
         
         raw_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-        
-        # NEU: Das ist der Gamechanger! 
-        # Macht aus "1 Stück\nverfügbar" -> "1 stück verfügbar"
         body_text = " ".join(raw_text.split())
         
         body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx")
@@ -297,6 +294,35 @@ HTML_TEMPLATE = """
             </form>
         </div>
     </div>
+
+    <div class="card shadow-sm">
+        <div class="card-header bg-secondary text-white">⚙️ System Einstellungen</div>
+        <div class="card-body">
+            <form action="/save_settings" method="POST">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Pushover User Key</label>
+                        <input type="text" name="pushover_user" class="form-control" value="{{ config.pushover_user }}" required>
+                    </div>
+                    <div class="col-md-6">
+                        <label class="form-label">Pushover App Token</label>
+                        <input type="text" name="pushover_token" class="form-control" value="{{ config.pushover_token }}" required>
+                    </div>
+                </div>
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <label class="form-label">Prüf-Intervall (Minuten)</label>
+                        <input type="number" name="interval" class="form-control" value="{{ config.interval }}" min="1" required>
+                    </div>
+                </div>
+                <div class="d-flex justify-content-between">
+                    <button type="submit" class="btn btn-secondary">Einstellungen Speichern</button>
+                    <a href="/test" class="btn btn-outline-info">Test-Benachrichtigung senden</a>
+                </div>
+            </form>
+        </div>
+    </div>
+
 </div>
 </body>
 </html>
