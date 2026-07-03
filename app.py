@@ -1,3 +1,4 @@
+```python
 import os
 import json
 import time
@@ -16,6 +17,7 @@ DATA_DIR = "data"
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 config_lock = threading.Lock()
 
+# Globale Konfiguration
 CONFIG = {
     "pushover_user": os.getenv("PUSHOVER_USER_KEY", ""),
     "pushover_token": os.getenv("PUSHOVER_APP_TOKEN", ""),
@@ -31,6 +33,7 @@ STATE = {
 tracker_thread = None
 stop_event = threading.Event()
 
+# --- DATEN-VERWALTUNG ---
 def init_data_dir():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
@@ -55,6 +58,7 @@ def save_config():
         with open(CONFIG_FILE, "w") as f:
             json.dump(CONFIG, f, indent=4)
 
+# --- PUSHOVER ---
 def send_pushover(message, item_url, image_path=None):
     try:
         data = {
@@ -76,6 +80,7 @@ def send_pushover(message, item_url, image_path=None):
     except Exception as e:
         print(f"Pushover Fehler: {e}")
 
+# --- TRACKER LOGIK (SELENIUM) ---
 def setup_driver():
     options = Options()
     options.add_argument("--headless")
@@ -88,24 +93,61 @@ def setup_driver():
 def check_item(driver, item):
     try:
         driver.get(item["url"])
-        time.sleep(5)
+        time.sleep(5) # Warten bis die Seite und Preise geladen sind
         
+        # 1. TRICK: Cookie-Banner wegklicken (hilft, damit Buttons klickbar werden)
+        try:
+            cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
+            driver.execute_script("arguments[0].click();", cookie_btn)
+            time.sleep(1)
+        except:
+            pass
+
+        # 2. TRICK: Filial-Liste aufklappen!
+        try:
+            # Sucht nach dem Link/Button, der die anderen OBI-Märkte anzeigt
+            market_buttons = driver.find_elements(By.XPATH, "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'markt') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'filiale')]")
+            for btn in market_buttons:
+                text = btn.text.lower()
+                if "prüfen" in text or "anderen" in text or "wählen" in text or "verfügbarkeit" in text or "ändern" in text:
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(3) # Warten, bis das Popup mit allen Filialen geladen ist
+                    break
+        except:
+            pass
+            
+        # 3. Den gesamten sichtbaren Text der Seite (inklusive aufgeklapptem Popup) auslesen
         body_text = driver.find_element(By.TAG_NAME, "body").text.lower()
         
+        # 4. TRICK: Falschmeldungen aussortieren
         body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx")
-        body_text = body_text.replace("nicht lieferbar", "xxx").replace("nicht verfügbar", "xxx")
+        body_text = body_text.replace("in keinem markt", "xxx").replace("nicht reservierbar", "xxx")
         
-        if "online ausverkauft" in body_text or "derzeit nicht verfügbar" in body_text or "ausverkauft" in body_text:
-            return False
-            
-        if "in den warenkorb" in body_text or "lieferung möglich" in body_text or "marktabholung" in body_text:
-            screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
-            driver.save_screenshot(screenshot_path)
-            item["has_screenshot"] = True
-            item["screenshot_time"] = time.time()
-            return True
-            
+        # GANZ WICHTIG: Wenn eine Filiale "0 Stück" hat, machen wir das unschädlich!
+        body_text = body_text.replace("0 stück", "xxx")
+        
+        # 5. Finale Prüfung nach positiven Signalen (Online ODER Filiale)
+        keywords = [
+            "in den warenkorb",       # Online verfügbar
+            "lieferung möglich",      # Online lieferbar
+            "im markt verfügbar",     # Filiale hat generellen Bestand
+            "stück verfügbar",        # Löst aus, wenn es NICHT 0 Stück sind (da 0 oben ersetzt wurde)
+            "reservieren & abholen",  # Filial-Verfügbarkeit
+            "marktabholung",
+            "abholung im markt"
+        ]
+        
+        for keyword in keywords:
+            if keyword in body_text:
+                # Wir haben einen Treffer in einer Filiale oder Online!
+                screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
+                driver.save_screenshot(screenshot_path)
+                item["has_screenshot"] = True
+                item["screenshot_time"] = time.time()
+                return True
+                
         return False
+        
     except Exception as e:
         print(f"Fehler bei {item['name']}: {e}")
         return False
@@ -147,6 +189,7 @@ def tracker_loop():
         STATE["status"] = f"Warte {CONFIG['interval']} Min..."
         stop_event.wait(CONFIG["interval"] * 60)
 
+# --- WEB UI HTML ---
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="de">
@@ -285,6 +328,7 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# --- FLASK ROUTES ---
 @app.route("/")
 def index():
     return render_template_string(HTML_TEMPLATE, config=CONFIG, state=STATE, time=time)
@@ -329,6 +373,7 @@ def reset_cooldown(item_id):
         if item["id"] == item_id:
             item["found_time"] = 0
             item["status"] = "Wartet auf Check..."
+            item["has_screenshot"] = False  # Entfernt auch das alte Screenshot-Bild in der UI
             save_config()
             break
     return redirect(url_for("index"))
@@ -366,3 +411,5 @@ def test_push():
 if __name__ == "__main__":
     load_config()
     app.run(host="0.0.0.0", port=5000)
+
+```
