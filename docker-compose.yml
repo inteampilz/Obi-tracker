@@ -1,0 +1,11 @@
+services:
+  obi-tracker:
+    build: .
+    container_name: obi_tracker
+    ports:
+      - "5000:5000"
+    environment:
+      # Die Werte werden in Portainer gesetzt
+      - PUSHOVER_USER_KEY=${PUSHOVER_USER_KEY}
+      - PUSHOVER_APP_TOKEN=${PUSHOVER_APP_TOKEN}
+    restart: unless-stopped
