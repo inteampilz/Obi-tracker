@@ -6,17 +6,17 @@ RUN apt-get update && apt-get install -y \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# NEU: Ein anderer Ordnername, damit der Docker-Cache sofort platzt
+WORKDIR /app_v3
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# NEU: Diese Zeile zwingt Portainer dazu, den Cache ab hier wegzuwerfen
-ENV FORCE_REBUILD=2023_11_NEW_DASHBOARD
+# Ein Zeitstempel als ultimativer Cache-Brecher
+ENV BUILD_DATE="2026-07-03"
 
 COPY app.py .
 
 EXPOSE 5000
 
-# Starte den Flask Web-Server
 CMD ["python", "app.py"]
