@@ -21,6 +21,7 @@ config_lock = threading.Lock()
 CONFIG = {
     "pushover_user": os.getenv("PUSHOVER_USER_KEY", ""),
     "pushover_token": os.getenv("PUSHOVER_APP_TOKEN", ""),
+    "pushover_priority": 0, # NEU: Standard-Priorität
     "interval": 15,
     "proxies": "", 
     "proxy_url": "",
@@ -34,19 +35,17 @@ STATE = {
     "current_proxy": "Wartemodus..."
 }
 
-# --- NEU: Live-Terminal Logs ---
 SYSTEM_LOGS = []
 MAX_LOGS = 50
 
 def log_msg(msg):
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     log_string = f"[{timestamp}] {msg}"
-    print(log_string)  # Für die Portainer-Konsole
+    print(log_string) 
     SYSTEM_LOGS.append(log_string)
     if len(SYSTEM_LOGS) > MAX_LOGS:
         SYSTEM_LOGS.pop(0)
 
-# --- NEU: User-Agent Rotation (Chamäleon-Trick) ---
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
@@ -86,14 +85,22 @@ def save_config():
 
 def send_pushover(message, item_url, image_path=None, title="🚨 Produkt-Tracker Alarm"):
     try:
+        priority = int(CONFIG.get("pushover_priority", 0))
         data = {
             "token": CONFIG["pushover_token"],
             "user": CONFIG["pushover_user"],
             "message": message,
             "title": title,
             "url": item_url,
-            "url_title": "Direkt zum Artikel"
+            "url_title": "Direkt zum Artikel",
+            "priority": priority
         }
+        
+        # Für Notfall-Priorität 2 verlangt Pushover zwingend retry/expire Werte!
+        if priority == 2:
+            data["retry"] = 30 # Alle 30 Sekunden wiederholen
+            data["expire"] = 3600 # Nach 1 Stunde aufhören
+
         files = {}
         if image_path and os.path.exists(image_path):
             files["attachment"] = ("screenshot.png", open(image_path, "rb"), "image/png")
@@ -102,7 +109,8 @@ def send_pushover(message, item_url, image_path=None, title="🚨 Produkt-Tracke
             requests.post("https://api.pushover.net/1/messages.json", data=data, files=files)
         else:
             requests.post("https://api.pushover.net/1/messages.json", data=data)
-        log_msg("Pushover-Nachricht erfolgreich gesendet!")
+            
+        log_msg(f"Pushover-Nachricht (Prio: {priority}) erfolgreich gesendet!")
     except Exception as e:
         log_msg(f"Pushover Fehler: {e}")
 
@@ -146,11 +154,9 @@ def setup_driver(proxy=None):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
     
-    # Tarnkappe Teil 1: Zufälliger User-Agent
     random_ua = random.choice(USER_AGENTS)
     options.add_argument(f"user-agent={random_ua}")
     
-    # Tarnkappe Teil 2: Automatisierungs-Flags verstecken
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
@@ -160,7 +166,6 @@ def setup_driver(proxy=None):
             
     driver = webdriver.Chrome(options=options)
     
-    # Tarnkappe Teil 3: Den heimlichen "webdriver = true" Flag im Browser löschen
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -201,21 +206,30 @@ def check_item(driver, item):
     driver.save_screenshot(debug_path)
     
     raw_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+    
+    # --- VERBESSERTE PREIS-EXTRAKTION ---
+    try:
+        prices = re.findall(r'chf\s*([0-9\']+[.,]?[0-9]*)', raw_text)
+        valid_prices = []
+        for p in prices:
+            clean_p = p.replace("'", "").replace("’", "").replace(",", ".")
+            try:
+                val = float(clean_p)
+                if 1.0 < val < 20000.0:
+                    valid_prices.append(val)
+            except:
+                continue
+        
+        if valid_prices:
+            item["current_price"] = valid_prices[0]
+            log_msg(f"✅ Preis erkannt: {item['current_price']} CHF")
+        else:
+            log_msg("⚠️ Kein valider Preis gefunden.")
+    except Exception as e:
+        log_msg(f"Fehler bei Preis-Extraktion: {e}")
+
     body_text = " ".join(raw_text.split())
     
-    # --- NEU: Preis-Extraktion ---
-    try:
-        prices = re.findall(r'chf\s*([0-9\'\.\,]+)', body_text)
-        if prices:
-            p_str = prices[0].replace("'", "").replace("’", "")
-            if p_str.endswith(".") or p_str.endswith("-"):
-                p_str = p_str[:-1]
-            item["current_price"] = float(p_str)
-            log_msg(f"Aktueller Preis erkannt: {item['current_price']} CHF")
-    except Exception as e:
-        log_msg(f"Konnte Preis nicht auslesen.")
-
-    # Falschmeldungen aussortieren
     body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx")
     body_text = body_text.replace("in keinem markt", "xxx").replace("nicht reservierbar", "xxx")
     body_text = body_text.replace("0 stück", "xxx").replace("momentan nicht", "xxx")
@@ -241,7 +255,6 @@ def check_item(driver, item):
         item["screenshot_time"] = time.time()
         return True, "available"
         
-    # Wenn nicht verfügbar, prüfen wir auf den Preis-Alarm!
     if item.get("current_price") and item.get("target_price"):
         if item["current_price"] <= item["target_price"]:
             screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
@@ -445,7 +458,6 @@ HTML_TEMPLATE = """
                 <div class="col-md-5">
                     <input type="url" name="url" class="form-control" placeholder="https://..." required>
                 </div>
-                <!-- NEU: WUNSCHPREIS -->
                 <div class="col-md-2">
                     <input type="number" step="0.05" name="target_price" class="form-control" placeholder="Preis-Alarm (CHF)">
                 </div>
@@ -456,7 +468,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Restliche Einstellungen -->
+    <!-- System Einstellungen & Proxys -->
     <div class="card shadow-sm">
         <div class="card-header bg-secondary text-white">⚙️ System Einstellungen & Proxys</div>
         <div class="card-body">
@@ -475,6 +487,17 @@ HTML_TEMPLATE = """
                     <div class="col-md-6">
                         <label class="form-label">Prüf-Intervall (Minuten)</label>
                         <input type="number" name="interval" class="form-control" value="{{ config.interval }}" min="1" required>
+                    </div>
+                    <!-- NEU: PUSHOVER PRIORITÄT -->
+                    <div class="col-md-6">
+                        <label class="form-label">Pushover Priorität</label>
+                        <select name="pushover_priority" class="form-select">
+                            <option value="-2" {% if config.pushover_priority == -2 %}selected{% endif %}>Stumm (-2)</option>
+                            <option value="-1" {% if config.pushover_priority == -1 %}selected{% endif %}>Leise (-1)</option>
+                            <option value="0" {% if config.pushover_priority == 0 %}selected{% endif %}>Normal (0)</option>
+                            <option value="1" {% if config.pushover_priority == 1 %}selected{% endif %}>Hoch (1) - Ignoriert Ruhezeiten</option>
+                            <option value="2" {% if config.pushover_priority == 2 %}selected{% endif %}>Notfall (2) - Klingelt bis zur Bestätigung!</option>
+                        </select>
                     </div>
                 </div>
                 <hr>
@@ -500,7 +523,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- JS für das Live-Terminal -->
 <script>
     function updateTerminal() {
         fetch('/api/logs')
@@ -521,7 +543,6 @@ HTML_TEMPLATE = """
             })
             .catch(err => console.error("Terminal Update Fehler:", err));
     }
-    // Alle 2 Sekunden Logs abrufen
     setInterval(updateTerminal, 2000);
     updateTerminal();
 </script>
@@ -542,11 +563,12 @@ def save_settings():
     CONFIG["pushover_user"] = request.form["pushover_user"]
     CONFIG["pushover_token"] = request.form["pushover_token"]
     CONFIG["interval"] = int(request.form["interval"])
+    CONFIG["pushover_priority"] = int(request.form.get("pushover_priority", 0))
     CONFIG["proxies"] = request.form.get("proxies", "")
     CONFIG["proxy_url"] = request.form.get("proxy_url", "")
     CONFIG["require_proxy"] = "require_proxy" in request.form
     save_config()
-    log_msg("Einstellungen gespeichert.")
+    log_msg(f"Einstellungen gespeichert. Priorität jetzt auf {CONFIG['pushover_priority']}.")
     return redirect(url_for("index"))
 
 @app.route("/add", methods=["POST"])
