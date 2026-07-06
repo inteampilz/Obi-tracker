@@ -21,7 +21,6 @@ app = Flask(__name__)
 DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "tracker.db")
 
-# Intelligentes Schloss gegen Deadlocks
 db_lock = threading.RLock()
 
 STATE = {
@@ -41,12 +40,13 @@ def log_msg(msg):
     if len(SYSTEM_LOGS) > MAX_LOGS:
         SYSTEM_LOGS.pop(0)
 
+# NEU: Hochmoderne User-Agents, damit CloudFront uns nicht blockiert!
 USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0"
 ]
 
 tracker_thread = None
@@ -175,27 +175,34 @@ def load_proxies():
     return final_list
 
 def setup_driver(proxy=None, item_name="System"):
-    log_msg(f"[{item_name}] ⚙️ Konfiguriere Chrome (Headless-Modus)...")
+    log_msg(f"[{item_name}] ⚙️ Konfiguriere Chrome Stealth-Modus...")
     options = Options()
-    options.add_argument("--headless")
+    
+    # NEU: Der neue Headless-Modus ist zwingend für CloudFront Bypassing!
+    options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     
     random_ua = random.choice(USER_AGENTS)
+    log_msg(f"[{item_name}] 🎭 Nutze Browser: {random_ua.split(' ')[0]} ...")
     options.add_argument(f"user-agent={random_ua}")
     
+    # Erweiterte Stealth-Optionen
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     
     if proxy: 
         options.add_argument(f"--proxy-server={proxy}")
-        log_msg(f"[{item_name}] 🌐 Chrome nutzt Proxy: {proxy}")
+        log_msg(f"[{item_name}] 🌐 Nutze Proxy: {proxy}")
     else:
-        log_msg(f"[{item_name}] ⚠️ Chrome nutzt lokale Server-IP (Kein Proxy).")
+        log_msg(f"[{item_name}] ⚠️ Keine Proxys aktiv (Lokale IP).")
             
     driver = webdriver.Chrome(options=options)
+    
+    # Lösche den 'webdriver' Flag komplett aus dem Javascript
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -224,68 +231,61 @@ def check_single_item(item, proxy_pool):
         
         try:
             driver = setup_driver(current_proxy, item_name=name)
-            driver.set_page_load_timeout(15) 
+            driver.set_page_load_timeout(20) 
             
-            log_msg(f"[{name}] 🚀 Rufe URL auf: {item['url'][:50]}...")
+            log_msg(f"[{name}] 🚀 Rufe URL auf...")
             driver.get(item["url"])
-            log_msg(f"[{name}] ⏳ Warte 3 Sekunden auf Seitenaufbau...")
-            time.sleep(3)
+            time.sleep(4)
             
-            # 1. COOKIES WEGKLICKEN
+            # CloudFront 403 / Captcha Prüfung
+            page_title = driver.title.lower()
+            if "403" in page_title or "forbidden" in page_title or "error" in page_title:
+                log_msg(f"[{name}] 🚨 CLOUDFRONT/WAF BLOCKIERT! IP wurde als Bot erkannt.")
+                raise Exception("CloudFront Block")
+            
             try:
-                log_msg(f"[{name}] 🍪 Suche nach Cookie-Banner...")
+                log_msg(f"[{name}] 🍪 Klicke Cookie-Banner...")
                 cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
                 driver.execute_script("arguments[0].click();", cookie_btn)
-                log_msg(f"[{name}] ✅ Cookie-Banner erfolgreich weggeklickt.")
                 time.sleep(1)
-            except: 
-                log_msg(f"[{name}] ℹ️ Kein Cookie-Banner gefunden oder bereits akzeptiert.")
+            except: pass
 
-            # 2. SCROLLEN & FILIAL-VERFÜGBARKEIT ÖFFNEN
-            log_msg(f"[{name}] 📜 Scrolle auf der Seite nach unten...")
+            log_msg(f"[{name}] 📜 Scrolle und suche nach Verfügbarkeits-Buttons...")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
-            time.sleep(1)
+            time.sleep(2)
             
             try:
-                log_msg(f"[{name}] 🏬 Suche nach Verfügbarkeits-Buttons ('Märkten', 'Filiale')...")
                 elements = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a") + driver.find_elements(By.CSS_SELECTOR, "[data-ui-name]")
                 clicked = False
+                
                 for el in elements:
                     text = el.text.lower()
                     ui_name = (el.get_attribute("data-ui-name") or "").lower()
+                    
                     if "märkten" in text or "verfügbarkeit" in text or "filiale" in text or "markt prüfen" in text or "availability" in ui_name or "store" in ui_name:
                         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
                         time.sleep(1)
                         driver.execute_script("arguments[0].click();", el)
-                        log_msg(f"[{name}] 🔘 Klick auf Filial-Verfügbarkeit erfolgreich!")
+                        log_msg(f"[{name}] 🔘 Filial-Button geklickt!")
                         clicked = True
-                        time.sleep(5) 
+                        time.sleep(6) 
                         break
+                        
                 if not clicked:
-                    log_msg(f"[{name}] ℹ️ Kein Button gefunden. Suche direkt im Seiten-Text weiter.")
+                    log_msg(f"[{name}] ℹ️ Kein spezieller Button gefunden.")
             except Exception as e: 
-                log_msg(f"[{name}] ⚠️ Fehler beim Klicken des Buttons. Ignoriere...")
+                log_msg(f"[{name}] ⚠️ Fehler beim Button-Klick.")
                 
-            # 3. BEWEISFOTO
             debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
             driver.save_screenshot(debug_path)
             log_msg(f"[{name}] 📸 Debug-Screenshot gespeichert.")
             
-            # ==========================================
-            # NEU: DER RÖNTGEN-BLICK (DOM EXTRACTION)
-            # ==========================================
-            log_msg(f"[{name}] 📝 Aktiviere Röntgen-Blick (Umgehe versteckte OBI-Modals)...")
+            log_msg(f"[{name}] 📝 Aktiviere Röntgen-Blick (DOM Extraction)...")
             
-            # a) Wir versuchen zuerst den normalen Text zu greifen
-            try:
-                visible_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-            except:
-                visible_text = ""
+            try: visible_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            except: visible_text = ""
                 
-            # b) Jetzt laden wir den kompletten, nackten Quellcode herunter
             raw_html = driver.page_source.lower()
-            
-            # c) Manchmal nutzen Shops Iframes für Lagerbestände, wir prüfen das vorsichtshalber mit
             iframe_text = ""
             try:
                 iframes = driver.find_elements(By.TAG_NAME, "iframe")
@@ -294,23 +294,16 @@ def check_single_item(item, proxy_pool):
                         driver.switch_to.frame(iframe)
                         iframe_text += " " + driver.page_source.lower()
                         driver.switch_to.default_content()
-                    except:
-                        driver.switch_to.default_content()
+                    except: driver.switch_to.default_content()
             except: pass
 
             combined_raw = raw_html + " " + iframe_text
-            
-            # d) Reinigung 1: Alle Skripte und Styles entfernen (damit Code-Fragmente keine Fehler auslösen)
             clean_text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', combined_raw, flags=re.IGNORECASE | re.DOTALL)
-            
-            # e) Reinigung 2: Alle verbleibenden HTML-Tags (<div>, <span> etc.) komplett löschen
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
             
-            # f) Wir werfen alles zusammen in einen riesigen, sauberen Text-Pool
             full_text = visible_text + " " + clean_text
             body_text = " ".join(full_text.split())
             
-            log_msg(f"[{name}] 🧹 Filtere Negativ-Worte aus dem extrahierten Code...")
             negatives = [
                 "keine lieferung", "keine abholung", "in keinem markt", "0 stück", 
                 "nicht reservierbar", "derzeit nicht verfügbar", "momentan nicht verfügbar",
@@ -319,7 +312,6 @@ def check_single_item(item, proxy_pool):
             for neg in negatives:
                 body_text = body_text.replace(neg, "xxx")
             
-            # Die goldenen Schlüsselwörter
             keywords = [
                 "in den warenkorb", "lieferung möglich", "im markt verfügbar", 
                 "märkten verfügbar", "stück verfügbar", "stück vorrätig", 
@@ -330,12 +322,12 @@ def check_single_item(item, proxy_pool):
             is_available = False
             for k in keywords:
                 if k in body_text:
-                    log_msg(f"[{name}] 🎯 TREFFER! Positives Keyword gefunden: '{k}'")
+                    log_msg(f"[{name}] 🎯 TREFFER! Keyword: '{k}'")
                     is_available = True
                     break
             
             if is_available:
-                log_msg(f"[{name}] 🚨 ALARM WIRD AUSGELÖST! Grund: VERFÜGBAR")
+                log_msg(f"[{name}] 🚨 ARTIKEL VERFÜGBAR!")
                 screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                 driver.save_screenshot(screenshot_path)
                 update_item_db(item["id"], has_screenshot=1, screenshot_time=time.time(), found_time=time.time(), status="✅ VERFÜGBAR!")
@@ -344,62 +336,43 @@ def check_single_item(item, proxy_pool):
                 log_msg(f"[{name}] ❌ Nicht verfügbar.")
                 update_item_db(item["id"], status="❌ Nicht verfügbar.")
                 
-            log_msg(f"[{name}] 🧹 Räume auf: Beende Browser...")
             driver.quit()
             success = True
-            log_msg(f"[{name}] ✨ DURCHLAUF ERFOLGREICH BEENDET.")
+            log_msg(f"[{name}] ✨ DURCHLAUF BEENDET.")
             break 
             
         except Exception as e:
-            log_msg(f"[{name}] 💥 FEHLER in Versuch {attempt+1}: Verbindung abgebrochen oder Timeout.")
+            log_msg(f"[{name}] 💥 FEHLER Versuch {attempt+1}: IP/Proxy Blockiert oder Timeout.")
             try: driver.quit()
             except: pass
             if current_proxy and current_proxy in proxy_pool:
                 proxy_pool.remove(current_proxy)
-                log_msg(f"[PROXY] Defekter Proxy '{current_proxy}' aus dem Pool entfernt.")
     
     if not success:
-        log_msg(f"[{name}] 💀 ABBRUCH nach {max_retries} gescheiterten Versuchen.")
-        update_item_db(item["id"], status="⚠️ Fehler (Proxys tot)")
+        log_msg(f"[{name}] 💀 ABBRUCH nach {max_retries} Versuchen.")
+        update_item_db(item["id"], status="⚠️ Blockiert (Firewall/Proxys tot)")
 
-# --- Minütlicher Check Loop ---
 def tracker_loop():
-    log_msg("[SYSTEM] 🟢 Tracker-Thread gestartet. System läuft.")
+    log_msg("[SYSTEM] 🟢 Tracker-Thread gestartet.")
     while not stop_event.is_set():
         items = get_items()
-        to_check = []
-        for i in items:
-            if i["is_active"] == 1:
-                interval_min = i.get("check_interval") or 15
-                if time.time() - i.get("found_time", 0) <= 86400:
-                    continue
-                if time.time() - i.get("last_check_ts", 0) >= (interval_min * 60):
-                    to_check.append(i)
+        to_check = [i for i in items if i["is_active"] == 1 and (time.time() - i.get("found_time", 0) > 86400) and (time.time() - i.get("last_check_ts", 0) >= ((i.get("check_interval") or 15) * 60))]
         
         if to_check:
-            log_msg(f"[SYSTEM] ⏰ Es sind {len(to_check)} Artikel fällig. Starte Prüf-Runde...")
             proxy_pool = load_proxies()
-            
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = []
                 for item in to_check:
                     now_str = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                     update_item_db(item["id"], last_check_ts=time.time(), last_check=now_str)
                     futures.append(executor.submit(check_single_item, item, proxy_pool))
-                
                 for f in futures:
                     if stop_event.is_set(): break
                     f.result() 
-            log_msg("[SYSTEM] ✅ Prüf-Runde komplett abgeschlossen.")
-        else:
-            log_msg("[SYSTEM] 💤 Kein Artikel fällig. Warte...")
                 
         STATE["status"] = "Warte auf nächste Intervalle..."
         stop_event.wait(60) 
 
-# ==========================================
-# WEB & DASHBOARD
-# ==========================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="de">
@@ -466,7 +439,7 @@ HTML_TEMPLATE = """
                             {% if item.is_active == 0 %}
                                 <span class="badge bg-secondary">⏸ Pausiert</span>
                             {% else %}
-                                <span class="badge {{ 'bg-success' if 'VERFÜGBAR' in item.status else ('bg-danger' if 'Fehler' in item.status else 'bg-secondary') }}">
+                                <span class="badge {{ 'bg-success' if 'VERFÜGBAR' in item.status else ('bg-danger' if 'Fehler' in item.status or 'Blockiert' in item.status else 'bg-secondary') }}">
                                     {{ item.status }}
                                 </span>
                             {% endif %}
