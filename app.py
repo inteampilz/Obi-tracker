@@ -21,7 +21,9 @@ app = Flask(__name__)
 DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "tracker.db")
 OLD_CONFIG = os.path.join(DATA_DIR, "config.json")
-db_lock = threading.Lock()
+
+# NEU: Ein intelligentes Schloss, das Deadlocks verhindert!
+db_lock = threading.RLock()
 
 STATE = {
     "is_running": False,
@@ -74,7 +76,6 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, 
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, price REAL)""")
         
-        # NEU: Migrations für bestehende Datenbanken (Fügt die Intervall-Spalten hinzu)
         try:
             c.execute("ALTER TABLE items ADD COLUMN check_interval INTEGER DEFAULT 15")
         except sqlite3.OperationalError: pass
@@ -83,7 +84,6 @@ def init_db():
             c.execute("ALTER TABLE items ADD COLUMN last_check_ts REAL DEFAULT 0")
         except sqlite3.OperationalError: pass
         
-        # Standard-Settings
         defaults = {
             "pushover_user": "", "pushover_token": "", "pushover_priority": "0",
             "proxies": "", "proxy_url": "", "require_proxy": "0"
@@ -92,7 +92,6 @@ def init_db():
             c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
         conn.commit()
 
-        # JSON Fallback Migration (falls du von der alten Version kommst)
         if os.path.exists(OLD_CONFIG):
             try:
                 with open(OLD_CONFIG, "r") as f:
@@ -259,18 +258,13 @@ def check_single_item(item, proxy_pool):
             # --- DER VERBESSERTE PREIS-SCANNER ---
             current_price = None
             try:
-                # Wartet aktiv bis zu 10 Sekunden, ob das Preis-Feld aufploppt
                 price_el = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-ui-name="ads.price.strong"]'))
                 )
                 raw_price = price_el.text.strip()
-                
-                # Bereinigung für Schweizer Layout (Ersetzt die fiesen Binde- und Geviertstriche durch 00)
                 clean_p = re.sub(r'[-–—]', '00', raw_price)
-                # Entfernt Tausender-Apostrophe
                 clean_p = clean_p.replace("'", "").replace("’", "")
                 
-                # Isoliert die reine Zahl
                 match = re.search(r'(\d+[\.,]?\d*)', clean_p)
                 if match:
                     final_price_str = match.group(1).replace(',', '.')
@@ -350,10 +344,8 @@ def tracker_loop():
         for i in items:
             if i["is_active"] == 1:
                 interval_min = i.get("check_interval") or 15
-                # Wenn Artikel in den letzten 24h gefunden wurde, ignorieren (Cooldown)
                 if time.time() - i.get("found_time", 0) <= 86400:
                     continue
-                # Wenn das Intervall für diesen Artikel abgelaufen ist -> ab auf die Liste!
                 if time.time() - i.get("last_check_ts", 0) >= (interval_min * 60):
                     to_check.append(i)
         
@@ -364,7 +356,6 @@ def tracker_loop():
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = []
                 for item in to_check:
-                    # Zeitstempel sofort aktualisieren, damit andere Threads ihn nicht nochmal packen
                     now_str = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
                     update_item_db(item["id"], last_check_ts=time.time(), last_check=now_str)
                     futures.append(executor.submit(check_single_item, item, proxy_pool))
@@ -374,7 +365,7 @@ def tracker_loop():
                     f.result() 
                 
         STATE["status"] = "Warte auf nächste Intervalle (Checkede minütlich)..."
-        stop_event.wait(60) # Der Bot wartet nur noch 1 Minute und prüft dann wieder die DB
+        stop_event.wait(60) 
 
 # ==========================================
 # WEB & DASHBOARD
@@ -486,7 +477,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Artikel hinzufügen (JETZT MIT INTERVALL-FELD) -->
+    <!-- Artikel hinzufügen -->
     <div class="card shadow-sm mb-4 border-primary">
         <div class="card-header bg-primary text-white">➕ Neuen Artikel hinzufügen</div>
         <div class="card-body">
@@ -505,7 +496,7 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <!-- Settings (Globales Intervall entfernt) -->
+    <!-- Settings -->
     <div class="card shadow-sm">
         <div class="card-header bg-secondary text-white">⚙️ System Einstellungen & Proxys</div>
         <div class="card-body">
@@ -596,15 +587,23 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ==========================================
+# WICHTIG: Die getrennten Datenbank-Abfragen, 
+# damit sich die Schlösser nicht mehr blockieren!
+# ==========================================
 @app.route("/")
 def index():
+    # 1. Wir holen die Settings (Schloss öffnet und schließt sich)
     with db_lock:
         conn = get_db()
         c = conn.cursor()
         c.execute("SELECT * FROM settings")
         settings_dict = {row["key"]: row["value"] for row in c.fetchall()}
-        items = get_items()
         conn.close()
+        
+    # 2. Wir holen die Artikel (Schloss öffnet und schließt sich separat)
+    items = get_items()
+    
     return render_template_string(HTML_TEMPLATE, settings=settings_dict, items=items, state=STATE, time=time)
 
 @app.route("/api/logs")
