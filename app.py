@@ -32,7 +32,6 @@ STATE = {
 }
 
 SYSTEM_LOGS = []
-# NEU: Terminal-Speicher vergrößert für den Verbose-Modus!
 MAX_LOGS = 200
 
 def log_msg(msg):
@@ -69,13 +68,11 @@ def init_db():
         conn = get_db()
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)""")
+        # target_price und current_price bleiben in der Tabelle, damit bestehende Datenbanken nicht crashen, werden aber ignoriert
         c.execute("""CREATE TABLE IF NOT EXISTS items (
             id TEXT PRIMARY KEY, name TEXT, url TEXT, target_price REAL, current_price REAL,
             status TEXT, last_check TEXT, has_screenshot INTEGER, screenshot_time REAL, 
             found_time REAL, is_active INTEGER DEFAULT 1)""")
-        c.execute("""CREATE TABLE IF NOT EXISTS price_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, 
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, price REAL)""")
         
         try: c.execute("ALTER TABLE items ADD COLUMN check_interval INTEGER DEFAULT 15")
         except sqlite3.OperationalError: pass
@@ -127,17 +124,6 @@ def update_item_db(item_id, **kwargs):
         conn.commit()
         conn.close()
 
-def log_price_history(item_id, price):
-    with db_lock:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT price FROM price_history WHERE item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
-        last = c.fetchone()
-        if not last or last["price"] != price:
-            c.execute("INSERT INTO price_history (item_id, price) VALUES (?, ?)", (item_id, price))
-            conn.commit()
-        conn.close()
-
 # ==========================================
 # SYSTEM-LOGIK
 # ==========================================
@@ -170,7 +156,6 @@ def load_proxies():
     if p_text: 
         manuelle = [p.strip() for p in p_text.split("\n") if p.strip()]
         proxies.extend(manuelle)
-        log_msg(f"[PROXY] {len(manuelle)} manuelle Proxys geladen.")
         
     api_url = get_setting("proxy_url").strip()
     if api_url:
@@ -260,33 +245,7 @@ def check_single_item(item, proxy_pool):
             except: 
                 log_msg(f"[{name}] ℹ️ Kein Cookie-Banner gefunden oder bereits akzeptiert.")
 
-            # 2. PREIS ZUERST ABFRAGEN
-            current_price = None
-            try:
-                log_msg(f"[{name}] 💰 Warte max 4s auf Preis-Element (data-ui-name='ads.price.strong')...")
-                price_el = WebDriverWait(driver, 4).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-ui-name="ads.price.strong"]'))
-                )
-                raw_price = price_el.text.strip()
-                log_msg(f"[{name}] 📝 Roher Preis-Text von Webseite: '{raw_price}'")
-                
-                clean_p = re.sub(r'[-–—]', '00', raw_price)
-                clean_p = clean_p.replace("'", "").replace("’", "")
-                
-                match = re.search(r'(\d+[\.,]?\d*)', clean_p)
-                if match:
-                    final_price_str = match.group(1).replace(',', '.')
-                    current_price = float(final_price_str)
-                    log_msg(f"[{name}] ✅ Erfolgreich bereinigt! Aktueller Preis: {current_price} CHF")
-                    
-                    update_item_db(item["id"], current_price=current_price)
-                    log_price_history(item["id"], current_price)
-                else:
-                    log_msg(f"[{name}] ❌ Konnte keine Zahlen im Text '{clean_p}' finden.")
-            except Exception as e:
-                log_msg(f"[{name}] ⚠️ Preis-Element Timeout (Kein Preis gefunden). Mache weiter...")
-            
-            # 3. SCROLLEN & FILIAL-VERFÜGBARKEIT
+            # 2. SCROLLEN & FILIAL-VERFÜGBARKEIT
             log_msg(f"[{name}] 📜 Scrolle auf der Seite nach unten...")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
             time.sleep(1)
@@ -306,7 +265,7 @@ def check_single_item(item, proxy_pool):
             except Exception as e: 
                 log_msg(f"[{name}] ℹ️ Kein spezifischer Filial-Button klickbar.")
                 
-            # 4. BEWEISFOTO & TEXT PRÜFEN
+            # 3. BEWEISFOTO & TEXT PRÜFEN
             debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
             driver.save_screenshot(debug_path)
             log_msg(f"[{name}] 📸 Debug-Screenshot gespeichert.")
@@ -327,29 +286,15 @@ def check_single_item(item, proxy_pool):
                     is_available = True
                     break
             
-            trigger_type = "none"
             if is_available:
-                trigger_type = "available"
-            elif current_price and item.get("target_price"):
-                log_msg(f"[{name}] ⚖️ Vergleiche Preis ({current_price}) mit Ziel ({item['target_price']})...")
-                if current_price <= item["target_price"]:
-                    trigger_type = "price_drop"
-
-            if trigger_type != "none":
-                log_msg(f"[{name}] 🚨 ALARM WIRD AUSGELÖST! Grund: {trigger_type.upper()}")
+                log_msg(f"[{name}] 🚨 ALARM WIRD AUSGELÖST! Grund: VERFÜGBAR")
                 screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                 driver.save_screenshot(screenshot_path)
-                update_item_db(item["id"], has_screenshot=1, screenshot_time=time.time(), found_time=time.time())
-                
-                if trigger_type == "available":
-                    update_item_db(item["id"], status="✅ VERFÜGBAR!")
-                    send_pushover(f"Artikel {name} verfügbar!", item["url"], screenshot_path)
-                else:
-                    update_item_db(item["id"], status=f"📉 PREIS-STURZ ({current_price} CHF)")
-                    send_pushover(f"Preis-Alarm! {name} ist auf {current_price} CHF gefallen!", item["url"], screenshot_path, "📉 Preis-Alarm")
+                update_item_db(item["id"], has_screenshot=1, screenshot_time=time.time(), found_time=time.time(), status="✅ VERFÜGBAR!")
+                send_pushover(f"Artikel {name} verfügbar!", item["url"], screenshot_path)
             else:
-                log_msg(f"[{name}] ❌ Weder verfügbar noch Preis-Limit unterschritten.")
-                update_item_db(item["id"], status="❌ Nicht verfügbar / Preis zu hoch.")
+                log_msg(f"[{name}] ❌ Nicht verfügbar.")
+                update_item_db(item["id"], status="❌ Nicht verfügbar.")
                 
             log_msg(f"[{name}] 🧹 Räume auf: Beende Browser...")
             driver.quit()
@@ -414,11 +359,9 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <title>Universal Tracker Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         .screenshot-thumb { max-height: 100px; cursor: pointer; transition: 0.3s; }
         .screenshot-thumb:hover { opacity: 0.8; }
-        /* NEU: Terminal etwas größer für VERY VERBOSE */
         #terminalLog { background-color: #1e1e1e; color: #00ff00; font-family: 'Courier New', monospace; font-size: 13px; resize: none; border: 1px solid #333; line-height: 1.2; }
         .inactive-row { opacity: 0.6; background-color: #f8f9fa; }
     </style>
@@ -440,11 +383,10 @@ HTML_TEMPLATE = """
     <!-- Live Terminal -->
     <div class="card shadow-sm mb-4 border-dark">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center py-2">
-            <span class="mb-0">📜 Live-Terminal (Very Verbose Mode)</span>
+            <span class="mb-0">📜 Live-Terminal (Bot-Status)</span>
             <span class="spinner-border spinner-border-sm text-success" role="status" aria-hidden="true" style="{{ 'display:none;' if not state.is_running else '' }}"></span>
         </div>
         <div class="card-body p-0">
-            <!-- ROWS erhöht für bessere Übersicht -->
             <textarea id="terminalLog" class="form-control rounded-0 border-0 p-3" rows="12" readonly>Warte auf Verbindung...</textarea>
         </div>
     </div>
@@ -460,7 +402,6 @@ HTML_TEMPLATE = """
                     <tr>
                         <th>Produkt</th>
                         <th>Status</th>
-                        <th>Preis & Chart</th>
                         <th>Beweise</th>
                         <th class="text-end">Aktion</th>
                     </tr>
@@ -477,16 +418,11 @@ HTML_TEMPLATE = """
                             {% if item.is_active == 0 %}
                                 <span class="badge bg-secondary">⏸ Pausiert</span>
                             {% else %}
-                                <span class="badge {{ 'bg-success' if ('VERFÜGBAR' in item.status or 'PREIS-STURZ' in item.status) else ('bg-danger' if 'Fehler' in item.status else 'bg-secondary') }}">
+                                <span class="badge {{ 'bg-success' if 'VERFÜGBAR' in item.status else ('bg-danger' if 'Fehler' in item.status else 'bg-secondary') }}">
                                     {{ item.status }}
                                 </span>
                             {% endif %}
                             <br><small class="text-muted">{{ item.last_check }}</small>
-                        </td>
-                        <td>
-                            <div class="fw-bold">{{ item.current_price if item.current_price else '?' }} CHF</div>
-                            {% if item.target_price %}<small class="text-info">Ziel: {{ item.target_price }} CHF</small><br>{% endif %}
-                            <button class="btn btn-sm btn-outline-primary mt-1 py-0 px-2" onclick="showChart('{{ item.id }}', '{{ item.name }}')">📈 Graph</button>
                         </td>
                         <td>
                             {% if item.has_screenshot %}
@@ -503,13 +439,13 @@ HTML_TEMPLATE = """
                                 {% else %}
                                     <a href="/toggle/{{ item.id }}" class="btn btn-outline-success">▶ Aktivieren</a>
                                 {% endif %}
-                                <a href="/reset_cooldown/{{ item.id }}" class="btn btn-outline-warning">Reset</a>
+                                <a href="/reset_cooldown/{{ item.id }}" class="btn btn-outline-warning">Reset / Check Now</a>
                                 <a href="/delete/{{ item.id }}" class="btn btn-outline-danger">Löschen</a>
                             </div>
                         </td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="5" class="text-center py-4 text-muted">Keine Artikel angelegt.</td></tr>
+                    <tr><td colspan="4" class="text-center py-4 text-muted">Keine Artikel angelegt.</td></tr>
                     {% endfor %}
                 </tbody>
             </table>
@@ -521,9 +457,8 @@ HTML_TEMPLATE = """
         <div class="card-header bg-primary text-white">➕ Neuen Artikel hinzufügen</div>
         <div class="card-body">
             <form action="/add" method="POST" class="row g-2">
-                <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="Produktname" required></div>
-                <div class="col-md-3"><input type="url" name="url" class="form-control" placeholder="https://..." required></div>
-                <div class="col-md-2"><input type="number" step="0.05" name="target_price" class="form-control" placeholder="Preis-Ziel (CHF)"></div>
+                <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="Produktname" required></div>
+                <div class="col-md-4"><input type="url" name="url" class="form-control" placeholder="https://..." required></div>
                 <div class="col-md-2">
                     <div class="input-group">
                         <input type="number" name="check_interval" class="form-control" placeholder="Intervall" value="15" required>
@@ -570,60 +505,17 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- Chart Modal -->
-<div class="modal fade" id="chartModal" tabindex="-1">
-  <div class="modal-dialog modal-lg">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title">Preisverlauf: <span id="chartItemName"></span></h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <div class="modal-body">
-        <canvas id="priceChart" width="400" height="200"></canvas>
-      </div>
-    </div>
-  </div>
-</div>
-
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
     function updateTerminal() {
         fetch('/api/logs').then(res => res.json()).then(data => {
             const t = document.getElementById('terminalLog');
-            // Prüft, ob der User manuell hochgescrollt hat
             const scroll = t.scrollHeight - t.clientHeight <= t.scrollTop + 5;
             t.value = data.length > 0 ? data.join('\\n') : "System bereit.";
-            // Scrollt nur automatisch nach unten, wenn wir eh schon unten waren
             if (scroll) t.scrollTop = t.scrollHeight;
         });
     }
-    // Lade-Intervall auf 1 Sekunde für direkteres Feedback
     setInterval(updateTerminal, 1000); updateTerminal();
-
-    let myChart = null;
-    const chartModal = new bootstrap.Modal(document.getElementById('chartModal'));
-    
-    function showChart(itemId, itemName) {
-        document.getElementById('chartItemName').innerText = itemName;
-        fetch('/api/history/' + itemId).then(res => res.json()).then(data => {
-            const ctx = document.getElementById('priceChart').getContext('2d');
-            if (myChart) myChart.destroy();
-            myChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: data.map(d => d.date),
-                    datasets: [{
-                        label: 'Preis (CHF)',
-                        data: data.map(d => d.price),
-                        borderColor: 'rgb(75, 192, 192)',
-                        tension: 0.1, fill: true, backgroundColor: 'rgba(75, 192, 192, 0.2)'
-                    }]
-                },
-                options: { scales: { y: { beginAtZero: false } } }
-            });
-            chartModal.show();
-        });
-    }
 </script>
 </body>
 </html>
@@ -643,16 +535,6 @@ def index():
 @app.route("/api/logs")
 def get_logs(): return jsonify(SYSTEM_LOGS)
 
-@app.route("/api/history/<item_id>")
-def get_history(item_id):
-    with db_lock:
-        conn = get_db()
-        c = conn.cursor()
-        c.execute("SELECT timestamp, price FROM price_history WHERE item_id = ? ORDER BY timestamp ASC", (item_id,))
-        rows = [{"date": row["timestamp"].split(" ")[0], "price": row["price"]} for row in c.fetchall()]
-        conn.close()
-    return jsonify(rows)
-
 @app.route("/save_settings", methods=["POST"])
 def save_settings_route():
     for k in ["pushover_user", "pushover_token", "pushover_priority", "proxies", "proxy_url"]:
@@ -663,15 +545,14 @@ def save_settings_route():
 
 @app.route("/add", methods=["POST"])
 def add_item_route():
-    tp = request.form.get("target_price")
     ci = request.form.get("check_interval", 15)
     item_id = str(uuid.uuid4())[:8]
     with db_lock:
         conn = get_db()
         c = conn.cursor()
-        c.execute("""INSERT INTO items (id, name, url, target_price, check_interval, status, is_active, last_check_ts) 
-                     VALUES (?, ?, ?, ?, ?, ?, 1, 0)""", 
-                  (item_id, request.form["name"], request.form["url"], float(tp) if tp else None, int(ci), "Wartet auf Check..."))
+        c.execute("""INSERT INTO items (id, name, url, check_interval, status, is_active, last_check_ts) 
+                     VALUES (?, ?, ?, ?, ?, 1, 0)""", 
+                  (item_id, request.form["name"], request.form["url"], int(ci), "Wartet auf Check..."))
         conn.commit()
         conn.close()
     log_msg(f"[SYSTEM] Neuer Artikel angelegt: {request.form['name']} (Intervall: {ci} Min)")
@@ -682,6 +563,7 @@ def delete_item_route(item_id):
     with db_lock:
         conn = get_db()
         conn.cursor().execute("DELETE FROM items WHERE id = ?", (item_id,))
+        # Preis-Historie existiert zwar technisch noch in der DB, aber wir löschen hier die Einträge mit
         conn.cursor().execute("DELETE FROM price_history WHERE item_id = ?", (item_id,))
         conn.commit()
         conn.close()
@@ -708,8 +590,9 @@ def toggle_item_route(item_id):
 
 @app.route("/reset_cooldown/<item_id>")
 def reset_cooldown_route(item_id):
-    update_item_db(item_id, found_time=0, status="Wartet auf Check...", has_screenshot=0)
-    log_msg("[SYSTEM] Cooldown für einen Artikel zurückgesetzt.")
+    # NEU: last_check_ts=0 setzt den Minutentimer auf Null, sodass beim nächsten Durchlauf sofort geprüft wird
+    update_item_db(item_id, found_time=0, status="Wartet auf Check...", has_screenshot=0, last_check_ts=0)
+    log_msg("[SYSTEM] Cooldown & Timer zurückgesetzt. Artikel wird in Kürze sofort geprüft!")
     return redirect(url_for("index"))
 
 @app.route("/screenshot/<item_id>")
