@@ -20,7 +20,6 @@ app = Flask(__name__)
 
 DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "tracker.db")
-OLD_CONFIG = os.path.join(DATA_DIR, "config.json")
 
 # Intelligentes Schloss gegen Deadlocks
 db_lock = threading.RLock()
@@ -68,7 +67,6 @@ def init_db():
         conn = get_db()
         c = conn.cursor()
         c.execute("""CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)""")
-        # target_price und current_price bleiben in der Tabelle, damit bestehende Datenbanken nicht crashen, werden aber ignoriert
         c.execute("""CREATE TABLE IF NOT EXISTS items (
             id TEXT PRIMARY KEY, name TEXT, url TEXT, target_price REAL, current_price REAL,
             status TEXT, last_check TEXT, has_screenshot INTEGER, screenshot_time REAL, 
@@ -185,7 +183,6 @@ def setup_driver(proxy=None, item_name="System"):
     options.add_argument("--window-size=1920,1080")
     
     random_ua = random.choice(USER_AGENTS)
-    log_msg(f"[{item_name}] 🎭 Setze Tarn-Browser: {random_ua.split(' ')[0]} ...")
     options.add_argument(f"user-agent={random_ua}")
     
     options.add_argument("--disable-blink-features=AutomationControlled")
@@ -202,7 +199,6 @@ def setup_driver(proxy=None, item_name="System"):
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
-    log_msg(f"[{item_name}] ✅ Chrome erfolgreich gestartet.")
     return driver
 
 def check_single_item(item, proxy_pool):
@@ -245,39 +241,91 @@ def check_single_item(item, proxy_pool):
             except: 
                 log_msg(f"[{name}] ℹ️ Kein Cookie-Banner gefunden oder bereits akzeptiert.")
 
-            # 2. SCROLLEN & FILIAL-VERFÜGBARKEIT
+            # 2. SCROLLEN & FILIAL-VERFÜGBARKEIT ÖFFNEN
             log_msg(f"[{name}] 📜 Scrolle auf der Seite nach unten...")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
             time.sleep(1)
             
             try:
                 log_msg(f"[{name}] 🏬 Suche nach Verfügbarkeits-Buttons ('Märkten', 'Filiale')...")
-                buttons = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a")
-                for btn in buttons:
-                    text = btn.text.lower()
-                    if "märkten" in text or "verfügbarkeit" in text or "filiale" in text:
-                        driver.execute_script("arguments[0].scrollIntoView(true);", btn)
+                elements = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a") + driver.find_elements(By.CSS_SELECTOR, "[data-ui-name]")
+                clicked = False
+                for el in elements:
+                    text = el.text.lower()
+                    ui_name = (el.get_attribute("data-ui-name") or "").lower()
+                    if "märkten" in text or "verfügbarkeit" in text or "filiale" in text or "markt prüfen" in text or "availability" in ui_name or "store" in ui_name:
+                        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
                         time.sleep(1)
-                        driver.execute_script("arguments[0].click();", btn)
+                        driver.execute_script("arguments[0].click();", el)
                         log_msg(f"[{name}] 🔘 Klick auf Filial-Verfügbarkeit erfolgreich!")
-                        time.sleep(4) 
+                        clicked = True
+                        time.sleep(5) 
                         break
+                if not clicked:
+                    log_msg(f"[{name}] ℹ️ Kein Button gefunden. Suche direkt im Seiten-Text weiter.")
             except Exception as e: 
-                log_msg(f"[{name}] ℹ️ Kein spezifischer Filial-Button klickbar.")
+                log_msg(f"[{name}] ⚠️ Fehler beim Klicken des Buttons. Ignoriere...")
                 
-            # 3. BEWEISFOTO & TEXT PRÜFEN
+            # 3. BEWEISFOTO
             debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
             driver.save_screenshot(debug_path)
             log_msg(f"[{name}] 📸 Debug-Screenshot gespeichert.")
             
-            log_msg(f"[{name}] 📝 Lese kompletten Text der Webseite aus...")
-            raw_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-            body_text = " ".join(raw_text.split())
+            # ==========================================
+            # NEU: DER RÖNTGEN-BLICK (DOM EXTRACTION)
+            # ==========================================
+            log_msg(f"[{name}] 📝 Aktiviere Röntgen-Blick (Umgehe versteckte OBI-Modals)...")
             
-            log_msg(f"[{name}] 🧹 Filtere Negativ-Worte (z.B. 'momentan nicht verfügbar')...")
-            body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx").replace("in keinem markt", "xxx").replace("0 stück", "xxx")
+            # a) Wir versuchen zuerst den normalen Text zu greifen
+            try:
+                visible_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+            except:
+                visible_text = ""
+                
+            # b) Jetzt laden wir den kompletten, nackten Quellcode herunter
+            raw_html = driver.page_source.lower()
             
-            keywords = ["in den warenkorb", "lieferung möglich", "im markt verfügbar", "märkten verfügbar", "stück verfügbar", "stück vorrätig", "reservieren & abholen", "filiale verfügbar"]
+            # c) Manchmal nutzen Shops Iframes für Lagerbestände, wir prüfen das vorsichtshalber mit
+            iframe_text = ""
+            try:
+                iframes = driver.find_elements(By.TAG_NAME, "iframe")
+                for iframe in iframes:
+                    try:
+                        driver.switch_to.frame(iframe)
+                        iframe_text += " " + driver.page_source.lower()
+                        driver.switch_to.default_content()
+                    except:
+                        driver.switch_to.default_content()
+            except: pass
+
+            combined_raw = raw_html + " " + iframe_text
+            
+            # d) Reinigung 1: Alle Skripte und Styles entfernen (damit Code-Fragmente keine Fehler auslösen)
+            clean_text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', combined_raw, flags=re.IGNORECASE | re.DOTALL)
+            
+            # e) Reinigung 2: Alle verbleibenden HTML-Tags (<div>, <span> etc.) komplett löschen
+            clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
+            
+            # f) Wir werfen alles zusammen in einen riesigen, sauberen Text-Pool
+            full_text = visible_text + " " + clean_text
+            body_text = " ".join(full_text.split())
+            
+            log_msg(f"[{name}] 🧹 Filtere Negativ-Worte aus dem extrahierten Code...")
+            negatives = [
+                "keine lieferung", "keine abholung", "in keinem markt", "0 stück", 
+                "nicht reservierbar", "derzeit nicht verfügbar", "momentan nicht verfügbar",
+                "ausverkauft", "nicht auf lager"
+            ]
+            for neg in negatives:
+                body_text = body_text.replace(neg, "xxx")
+            
+            # Die goldenen Schlüsselwörter
+            keywords = [
+                "in den warenkorb", "lieferung möglich", "im markt verfügbar", 
+                "märkten verfügbar", "stück verfügbar", "stück vorrätig", 
+                "reservieren & abholen", "filiale verfügbar", "abholbereit",
+                "auf lager", "stück auf lager", "reservierbar", "in deiner filiale abholen"
+            ]
             
             is_available = False
             for k in keywords:
@@ -383,7 +431,7 @@ HTML_TEMPLATE = """
     <!-- Live Terminal -->
     <div class="card shadow-sm mb-4 border-dark">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center py-2">
-            <span class="mb-0">📜 Live-Terminal (Bot-Status)</span>
+            <span class="mb-0">📜 Live-Terminal (Very Verbose Mode)</span>
             <span class="spinner-border spinner-border-sm text-success" role="status" aria-hidden="true" style="{{ 'display:none;' if not state.is_running else '' }}"></span>
         </div>
         <div class="card-body p-0">
@@ -457,8 +505,8 @@ HTML_TEMPLATE = """
         <div class="card-header bg-primary text-white">➕ Neuen Artikel hinzufügen</div>
         <div class="card-body">
             <form action="/add" method="POST" class="row g-2">
-                <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="Produktname" required></div>
-                <div class="col-md-4"><input type="url" name="url" class="form-control" placeholder="https://..." required></div>
+                <div class="col-md-5"><input type="text" name="name" class="form-control" placeholder="Produktname" required></div>
+                <div class="col-md-5"><input type="url" name="url" class="form-control" placeholder="https://..." required></div>
                 <div class="col-md-2">
                     <div class="input-group">
                         <input type="number" name="check_interval" class="form-control" placeholder="Intervall" value="15" required>
@@ -505,7 +553,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
     function updateTerminal() {
         fetch('/api/logs').then(res => res.json()).then(data => {
@@ -555,7 +602,6 @@ def add_item_route():
                   (item_id, request.form["name"], request.form["url"], int(ci), "Wartet auf Check..."))
         conn.commit()
         conn.close()
-    log_msg(f"[SYSTEM] Neuer Artikel angelegt: {request.form['name']} (Intervall: {ci} Min)")
     return redirect(url_for("index"))
 
 @app.route("/delete/<item_id>")
@@ -563,13 +609,10 @@ def delete_item_route(item_id):
     with db_lock:
         conn = get_db()
         conn.cursor().execute("DELETE FROM items WHERE id = ?", (item_id,))
-        # Preis-Historie existiert zwar technisch noch in der DB, aber wir löschen hier die Einträge mit
-        conn.cursor().execute("DELETE FROM price_history WHERE item_id = ?", (item_id,))
         conn.commit()
         conn.close()
     img = os.path.join(DATA_DIR, f"screenshot_{item_id}.png")
     if os.path.exists(img): os.remove(img)
-    log_msg(f"[SYSTEM] Ein Artikel wurde gelöscht.")
     return redirect(url_for("index"))
 
 @app.route("/toggle/<item_id>")
@@ -577,22 +620,16 @@ def toggle_item_route(item_id):
     with db_lock:
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT is_active, name FROM items WHERE id = ?", (item_id,))
-        row = c.fetchone()
-        current = row["is_active"]
-        name = row["name"]
-        new_status = 0 if current == 1 else 1
+        c.execute("SELECT is_active FROM items WHERE id = ?", (item_id,))
+        new_status = 0 if c.fetchone()["is_active"] == 1 else 1
         c.execute("UPDATE items SET is_active = ? WHERE id = ?", (new_status, item_id))
         conn.commit()
         conn.close()
-    log_msg(f"[SYSTEM] Artikel '{name}' wurde {'AKTIVIERT' if new_status == 1 else 'PAUSIERT'}.")
     return redirect(url_for("index"))
 
 @app.route("/reset_cooldown/<item_id>")
 def reset_cooldown_route(item_id):
-    # NEU: last_check_ts=0 setzt den Minutentimer auf Null, sodass beim nächsten Durchlauf sofort geprüft wird
     update_item_db(item_id, found_time=0, status="Wartet auf Check...", has_screenshot=0, last_check_ts=0)
-    log_msg("[SYSTEM] Cooldown & Timer zurückgesetzt. Artikel wird in Kürze sofort geprüft!")
     return redirect(url_for("index"))
 
 @app.route("/screenshot/<item_id>")
@@ -621,7 +658,6 @@ def stop():
         stop_event.set()
         STATE["is_running"] = False
         STATE["status"] = "Gestoppt"
-        log_msg("[SYSTEM] 🛑 Tracker-Prozess manuell gestoppt!")
     return redirect(url_for("index"))
 
 @app.route("/test")
