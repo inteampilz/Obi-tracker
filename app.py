@@ -21,6 +21,7 @@ app = Flask(__name__)
 DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "tracker.db")
 
+# Intelligentes Schloss gegen Deadlocks
 db_lock = threading.RLock()
 
 STATE = {
@@ -40,7 +41,6 @@ def log_msg(msg):
     if len(SYSTEM_LOGS) > MAX_LOGS:
         SYSTEM_LOGS.pop(0)
 
-# NEU: Hochmoderne User-Agents, damit CloudFront uns nicht blockiert!
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -178,7 +178,6 @@ def setup_driver(proxy=None, item_name="System"):
     log_msg(f"[{item_name}] ⚙️ Konfiguriere Chrome Stealth-Modus...")
     options = Options()
     
-    # NEU: Der neue Headless-Modus ist zwingend für CloudFront Bypassing!
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -189,7 +188,6 @@ def setup_driver(proxy=None, item_name="System"):
     log_msg(f"[{item_name}] 🎭 Nutze Browser: {random_ua.split(' ')[0]} ...")
     options.add_argument(f"user-agent={random_ua}")
     
-    # Erweiterte Stealth-Optionen
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
@@ -201,8 +199,6 @@ def setup_driver(proxy=None, item_name="System"):
         log_msg(f"[{item_name}] ⚠️ Keine Proxys aktiv (Lokale IP).")
             
     driver = webdriver.Chrome(options=options)
-    
-    # Lösche den 'webdriver' Flag komplett aus dem Javascript
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
@@ -237,7 +233,6 @@ def check_single_item(item, proxy_pool):
             driver.get(item["url"])
             time.sleep(4)
             
-            # CloudFront 403 / Captcha Prüfung
             page_title = driver.title.lower()
             if "403" in page_title or "forbidden" in page_title or "error" in page_title:
                 log_msg(f"[{name}] 🚨 CLOUDFRONT/WAF BLOCKIERT! IP wurde als Bot erkannt.")
@@ -280,60 +275,49 @@ def check_single_item(item, proxy_pool):
             driver.save_screenshot(debug_path)
             log_msg(f"[{name}] 📸 Debug-Screenshot gespeichert.")
             
-            log_msg(f"[{name}] 📝 Aktiviere Röntgen-Blick (DOM Extraction)...")
+            log_msg(f"[{name}] 📝 Aktiviere strengen OBI-Textfilter (False-Positive Schutz)...")
             
-            try: visible_text = driver.find_element(By.TAG_NAME, "body").text.lower()
-            except: visible_text = ""
-                
             raw_html = driver.page_source.lower()
-            iframe_text = ""
-            try:
-                iframes = driver.find_elements(By.TAG_NAME, "iframe")
-                for iframe in iframes:
-                    try:
-                        driver.switch_to.frame(iframe)
-                        iframe_text += " " + driver.page_source.lower()
-                        driver.switch_to.default_content()
-                    except: driver.switch_to.default_content()
-            except: pass
-
-            combined_raw = raw_html + " " + iframe_text
-            clean_text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', combined_raw, flags=re.IGNORECASE | re.DOTALL)
+            clean_text = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', raw_html, flags=re.IGNORECASE | re.DOTALL)
             clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
-            
-            full_text = visible_text + " " + clean_text
-            body_text = " ".join(full_text.split())
-            
-            negatives = [
-                "keine lieferung", "keine abholung", "in keinem markt", "0 stück", 
-                "nicht reservierbar", "derzeit nicht verfügbar", "momentan nicht verfügbar",
-                "ausverkauft", "nicht auf lager"
-            ]
-            for neg in negatives:
-                body_text = body_text.replace(neg, "xxx")
-            
-            keywords = [
-                "in den warenkorb", "lieferung möglich", "im markt verfügbar", 
-                "märkten verfügbar", "stück verfügbar", "stück vorrätig", 
-                "reservieren & abholen", "filiale verfügbar", "abholbereit",
-                "auf lager", "stück auf lager", "reservierbar", "in deiner filiale abholen"
-            ]
+            body_text = " ".join(clean_text.split())
             
             is_available = False
-            for k in keywords:
-                if k in body_text:
-                    log_msg(f"[{name}] 🎯 TREFFER! Keyword: '{k}'")
+            
+            # --- 1. TOTSCHLAG-ARGUMENTE (Knockouts) ---
+            if ("nichts gefunden" in body_text and "in keinem" in body_text) or "ausverkauft" in body_text:
+                log_msg(f"[{name}] 🛑 KNOCKOUT: Popup meldet 'Nichts gefunden' oder Artikel ist 'Ausverkauft'.")
+                is_available = False
+            else:
+                # --- 2. SCHARFE POSITIV-PRÜFUNG ---
+                
+                # Methode A: Suche nach echtem Filial-Bestand (Sucht z.B. nach "12 stück auf lager")
+                # Sucht nach einer Zahl von 1-9999, gefolgt von "stück auf lager". (0 wird komplett ignoriert)
+                stock_matches = re.findall(r'([1-9][0-9]*)\s*stück auf lager', body_text)
+                
+                if stock_matches:
+                    log_msg(f"[{name}] 🎯 TREFFER (Filiale): Echter Bestand von {stock_matches[0]} Stück gefunden!")
                     is_available = True
-                    break
+                else:
+                    # Methode B: Suche nach klickbarem "In den Warenkorb" Button für reine Online-Käufe
+                    try:
+                        cart_btns = driver.find_elements(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'in den warenkorb')]")
+                        for btn in cart_btns:
+                            # Prüfen ob der Button wirklich sichtbar und aktiv ist (ignoriert versteckte oder Slider-Buttons)
+                            if btn.is_displayed() and btn.is_enabled():
+                                log_msg(f"[{name}] 🎯 TREFFER (Online): 'In den Warenkorb' Button ist aktiv!")
+                                is_available = True
+                                break
+                    except: pass
             
             if is_available:
-                log_msg(f"[{name}] 🚨 ARTIKEL VERFÜGBAR!")
+                log_msg(f"[{name}] 🚨 ARTIKEL IST VERFÜGBAR!")
                 screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                 driver.save_screenshot(screenshot_path)
                 update_item_db(item["id"], has_screenshot=1, screenshot_time=time.time(), found_time=time.time(), status="✅ VERFÜGBAR!")
                 send_pushover(f"Artikel {name} verfügbar!", item["url"], screenshot_path)
             else:
-                log_msg(f"[{name}] ❌ Nicht verfügbar.")
+                log_msg(f"[{name}] ❌ Nicht verfügbar (Keine Bestandszahl gefunden).")
                 update_item_db(item["id"], status="❌ Nicht verfügbar.")
                 
             driver.quit()
