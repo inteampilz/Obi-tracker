@@ -22,7 +22,7 @@ DATA_DIR = "data"
 DB_FILE = os.path.join(DATA_DIR, "tracker.db")
 OLD_CONFIG = os.path.join(DATA_DIR, "config.json")
 
-# NEU: Ein intelligentes Schloss, das Deadlocks verhindert!
+# Intelligentes Schloss gegen Deadlocks
 db_lock = threading.RLock()
 
 STATE = {
@@ -76,12 +76,10 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT, 
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, price REAL)""")
         
-        try:
-            c.execute("ALTER TABLE items ADD COLUMN check_interval INTEGER DEFAULT 15")
+        try: c.execute("ALTER TABLE items ADD COLUMN check_interval INTEGER DEFAULT 15")
         except sqlite3.OperationalError: pass
         
-        try:
-            c.execute("ALTER TABLE items ADD COLUMN last_check_ts REAL DEFAULT 0")
+        try: c.execute("ALTER TABLE items ADD COLUMN last_check_ts REAL DEFAULT 0")
         except sqlite3.OperationalError: pass
         
         defaults = {
@@ -91,30 +89,6 @@ def init_db():
         for k, v in defaults.items():
             c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
         conn.commit()
-
-        if os.path.exists(OLD_CONFIG):
-            try:
-                with open(OLD_CONFIG, "r") as f:
-                    old_data = json.load(f)
-                
-                for k in ["pushover_user", "pushover_token", "pushover_priority", "proxies", "proxy_url"]:
-                    if k in old_data:
-                        c.execute("UPDATE settings SET value = ? WHERE key = ?", (str(old_data[k]), k))
-                if "require_proxy" in old_data:
-                    c.execute("UPDATE settings SET value = ? WHERE key = ?", ("1" if old_data["require_proxy"] else "0", "require_proxy"))
-                
-                for item in old_data.get("items", []):
-                    c.execute("""INSERT OR IGNORE INTO items 
-                        (id, name, url, target_price, current_price, status, last_check, has_screenshot, screenshot_time, found_time, is_active, check_interval, last_check_ts) 
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 15, 0)""", 
-                        (item.get("id"), item.get("name"), item.get("url"), item.get("target_price"), 
-                         item.get("current_price"), item.get("status"), item.get("last_check"), 
-                         1 if item.get("has_screenshot") else 0, item.get("screenshot_time", 0), 
-                         item.get("found_time", 0)))
-                conn.commit()
-                os.rename(OLD_CONFIG, OLD_CONFIG + ".bak")
-            except Exception as e:
-                log_msg(f"Fehler bei DB Migration: {e}")
         conn.close()
 
 def get_setting(key):
@@ -225,7 +199,7 @@ def setup_driver(proxy=None):
 def check_single_item(item, proxy_pool):
     if stop_event.is_set(): return
     
-    max_retries = 10
+    max_retries = 4 # NEU: Reduziert von 10 auf 4, damit es nicht ewig hängt!
     success = False
     require_proxy = get_setting("require_proxy") == "1"
 
@@ -239,29 +213,30 @@ def check_single_item(item, proxy_pool):
         current_proxy = random.choice(proxy_pool) if proxy_pool else None
         if require_proxy and not current_proxy: continue
             
-        log_msg(f"Prüfe {item['name']} (Versuch {attempt+1})")
+        log_msg(f"🔍 {item['name']} - Versuch {attempt+1}/{max_retries} ({current_proxy or 'Lokale IP'})")
         
         try:
             driver = setup_driver(current_proxy)
-            driver.set_page_load_timeout(20) 
+            driver.set_page_load_timeout(15) 
             driver.get(item["url"])
             time.sleep(3)
             
+            # 1. COOKIES WEGKLICKEN (damit sie nichts blockieren)
             try:
                 cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
                 driver.execute_script("arguments[0].click();", cookie_btn)
                 time.sleep(1)
             except: pass
 
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
-
-            # --- DER VERBESSERTE PREIS-SCANNER ---
+            # 2. PREIS ZUERST ABFRAGEN (Max 4 Sekunden warten, um Hänger zu vermeiden!)
             current_price = None
             try:
-                price_el = WebDriverWait(driver, 10).until(
+                price_el = WebDriverWait(driver, 4).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-ui-name="ads.price.strong"]'))
                 )
                 raw_price = price_el.text.strip()
+                
+                # OBI Schweiz Formatierung fixen (Entfernt Striche und Apostrophe)
                 clean_p = re.sub(r'[-–—]', '00', raw_price)
                 clean_p = clean_p.replace("'", "").replace("’", "")
                 
@@ -269,14 +244,17 @@ def check_single_item(item, proxy_pool):
                 if match:
                     final_price_str = match.group(1).replace(',', '.')
                     current_price = float(final_price_str)
-                    log_msg(f"✅ Preis für {item['name']} fehlerfrei erkannt: {current_price} CHF")
+                    log_msg(f"✅ Preis für {item['name']} gesichert: {current_price} CHF")
                     
                     update_item_db(item["id"], current_price=current_price)
                     log_price_history(item["id"], current_price)
             except Exception as e:
-                log_msg(f"⚠️ Preiselement für {item['name']} nicht gefunden oder nicht lesbar.")
+                log_msg(f"⚠️ Preis-Element bei {item['name']} nicht rechtzeitig gefunden. Mache weiter...")
             
-            # --- VERFÜGBARKEITS-SCANNER ---
+            # 3. SCROLLEN & FILIAL-VERFÜGBARKEIT IN DEN VORDERGRUND HOLEN
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
+            time.sleep(1)
+            
             try:
                 buttons = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a")
                 for btn in buttons:
@@ -285,10 +263,12 @@ def check_single_item(item, proxy_pool):
                         driver.execute_script("arguments[0].scrollIntoView(true);", btn)
                         time.sleep(1)
                         driver.execute_script("arguments[0].click();", btn)
+                        log_msg(f"🔘 Filial-Menü für {item['name']} geöffnet.")
                         time.sleep(4) 
                         break
             except: pass
                 
+            # 4. BEWEISFOTO & VERFÜGBARKEIT PRÜFEN
             debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
             driver.save_screenshot(debug_path)
             
@@ -332,13 +312,12 @@ def check_single_item(item, proxy_pool):
                 proxy_pool.remove(current_proxy)
     
     if not success:
+        log_msg(f"❌ {item['name']} nach {max_retries} Versuchen fehlgeschlagen.")
         update_item_db(item["id"], status="⚠️ Fehler (Proxys tot)")
 
-# --- NEU: Minütlicher Check Loop ---
+# --- Minütlicher Check Loop ---
 def tracker_loop():
     while not stop_event.is_set():
-        STATE["status"] = "Prüfe, ob Artikel fällig sind..."
-        
         items = get_items()
         to_check = []
         for i in items:
@@ -351,7 +330,7 @@ def tracker_loop():
         
         if to_check:
             proxy_pool = load_proxies()
-            log_msg(f"Starte Scraping für {len(to_check)} fällige Artikel...")
+            log_msg(f"▶️ Starte paralleles Scraping für {len(to_check)} fällige Artikel...")
             
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = []
@@ -364,7 +343,7 @@ def tracker_loop():
                     if stop_event.is_set(): break
                     f.result() 
                 
-        STATE["status"] = "Warte auf nächste Intervalle (Checkede minütlich)..."
+        STATE["status"] = "Warte auf nächste Intervalle..."
         stop_event.wait(60) 
 
 # ==========================================
@@ -587,23 +566,15 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# ==========================================
-# WICHTIG: Die getrennten Datenbank-Abfragen, 
-# damit sich die Schlösser nicht mehr blockieren!
-# ==========================================
 @app.route("/")
 def index():
-    # 1. Wir holen die Settings (Schloss öffnet und schließt sich)
     with db_lock:
         conn = get_db()
         c = conn.cursor()
         c.execute("SELECT * FROM settings")
         settings_dict = {row["key"]: row["value"] for row in c.fetchall()}
         conn.close()
-        
-    # 2. Wir holen die Artikel (Schloss öffnet und schließt sich separat)
     items = get_items()
-    
     return render_template_string(HTML_TEMPLATE, settings=settings_dict, items=items, state=STATE, time=time)
 
 @app.route("/api/logs")
