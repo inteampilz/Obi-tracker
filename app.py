@@ -32,7 +32,8 @@ STATE = {
 }
 
 SYSTEM_LOGS = []
-MAX_LOGS = 50
+# NEU: Terminal-Speicher vergrößert für den Verbose-Modus!
+MAX_LOGS = 200
 
 def log_msg(msg):
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
@@ -143,6 +144,7 @@ def log_price_history(item_id, price):
 def send_pushover(message, item_url, image_path=None, title="🚨 Produkt-Tracker Alarm"):
     try:
         priority = int(get_setting("pushover_priority") or "0")
+        log_msg(f"[SYSTEM] Sende Pushover Benachrichtigung (Priorität: {priority})...")
         data = {
             "token": get_setting("pushover_token"), "user": get_setting("pushover_user"),
             "message": message, "title": title, "url": item_url, "url_title": "Direkt zum Artikel",
@@ -158,53 +160,77 @@ def send_pushover(message, item_url, image_path=None, title="🚨 Produkt-Tracke
         
         if files: requests.post("https://api.pushover.net/1/messages.json", data=data, files=files)
         else: requests.post("https://api.pushover.net/1/messages.json", data=data)
+        log_msg(f"[SYSTEM] ✅ Pushover erfolgreich gesendet.")
     except Exception as e:
-        log_msg(f"Pushover Fehler: {e}")
+        log_msg(f"[SYSTEM] ❌ Pushover Fehler: {e}")
 
 def load_proxies():
     proxies = []
     p_text = get_setting("proxies")
-    if p_text: proxies.extend([p.strip() for p in p_text.split("\n") if p.strip()])
+    if p_text: 
+        manuelle = [p.strip() for p in p_text.split("\n") if p.strip()]
+        proxies.extend(manuelle)
+        log_msg(f"[PROXY] {len(manuelle)} manuelle Proxys geladen.")
         
     api_url = get_setting("proxy_url").strip()
     if api_url:
         try:
+            log_msg(f"[PROXY] Lade externe Proxy-Liste herunter...")
             resp = requests.get(api_url, timeout=10)
             found = re.findall(r'[0-9]+(?:\.[0-9]+){3}:[0-9]+', resp.text)
             protocol = "http"
             if "socks5" in api_url.lower(): protocol = "socks5"
             elif "socks4" in api_url.lower(): protocol = "socks4"
-            proxies.extend([f"{protocol}://{p}" for p in found])
-        except Exception: pass
-    return list(set(proxies))
+            api_proxies = [f"{protocol}://{p}" for p in found]
+            proxies.extend(api_proxies)
+            log_msg(f"[PROXY] ✅ {len(api_proxies)} {protocol.upper()}-Proxys von API gefunden.")
+        except Exception as e: 
+            log_msg(f"[PROXY] ⚠️ Fehler beim API-Download: {e}")
+            
+    final_list = list(set(proxies))
+    log_msg(f"[PROXY] Insgesamt {len(final_list)} einzigartige Proxys im Pool verfügbar.")
+    return final_list
 
-def setup_driver(proxy=None):
+def setup_driver(proxy=None, item_name="System"):
+    log_msg(f"[{item_name}] ⚙️ Konfiguriere Chrome (Headless-Modus)...")
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument(f"user-agent={random.choice(USER_AGENTS)}")
+    
+    random_ua = random.choice(USER_AGENTS)
+    log_msg(f"[{item_name}] 🎭 Setze Tarn-Browser: {random_ua.split(' ')[0]} ...")
+    options.add_argument(f"user-agent={random_ua}")
+    
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    if proxy: options.add_argument(f"--proxy-server={proxy}")
+    
+    if proxy: 
+        options.add_argument(f"--proxy-server={proxy}")
+        log_msg(f"[{item_name}] 🌐 Chrome nutzt Proxy: {proxy}")
+    else:
+        log_msg(f"[{item_name}] ⚠️ Chrome nutzt lokale Server-IP (Kein Proxy).")
             
     driver = webdriver.Chrome(options=options)
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
+    log_msg(f"[{item_name}] ✅ Chrome erfolgreich gestartet.")
     return driver
 
 def check_single_item(item, proxy_pool):
     if stop_event.is_set(): return
     
-    max_retries = 4 # NEU: Reduziert von 10 auf 4, damit es nicht ewig hängt!
+    max_retries = 4 
     success = False
     require_proxy = get_setting("require_proxy") == "1"
+    name = item['name']
 
     if require_proxy and not proxy_pool:
         update_item_db(item["id"], status="⚠️ Fehler: Proxy-Zwang an, keine Proxys.", last_check_ts=time.time())
+        log_msg(f"[{name}] 🛑 ABBRUCH: Proxy zwingend, aber Pool ist leer!")
         return
         
     for attempt in range(max_retries):
@@ -213,30 +239,37 @@ def check_single_item(item, proxy_pool):
         current_proxy = random.choice(proxy_pool) if proxy_pool else None
         if require_proxy and not current_proxy: continue
             
-        log_msg(f"🔍 {item['name']} - Versuch {attempt+1}/{max_retries} ({current_proxy or 'Lokale IP'})")
+        log_msg(f"[{name}] 🔄 START VERSUCH {attempt+1}/{max_retries}...")
         
         try:
-            driver = setup_driver(current_proxy)
+            driver = setup_driver(current_proxy, item_name=name)
             driver.set_page_load_timeout(15) 
+            
+            log_msg(f"[{name}] 🚀 Rufe URL auf: {item['url'][:50]}...")
             driver.get(item["url"])
+            log_msg(f"[{name}] ⏳ Warte 3 Sekunden auf Seitenaufbau...")
             time.sleep(3)
             
-            # 1. COOKIES WEGKLICKEN (damit sie nichts blockieren)
+            # 1. COOKIES WEGKLICKEN
             try:
+                log_msg(f"[{name}] 🍪 Suche nach Cookie-Banner...")
                 cookie_btn = driver.find_element(By.XPATH, "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'akzeptieren') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'zulassen')]")
                 driver.execute_script("arguments[0].click();", cookie_btn)
+                log_msg(f"[{name}] ✅ Cookie-Banner erfolgreich weggeklickt.")
                 time.sleep(1)
-            except: pass
+            except: 
+                log_msg(f"[{name}] ℹ️ Kein Cookie-Banner gefunden oder bereits akzeptiert.")
 
-            # 2. PREIS ZUERST ABFRAGEN (Max 4 Sekunden warten, um Hänger zu vermeiden!)
+            # 2. PREIS ZUERST ABFRAGEN
             current_price = None
             try:
+                log_msg(f"[{name}] 💰 Warte max 4s auf Preis-Element (data-ui-name='ads.price.strong')...")
                 price_el = WebDriverWait(driver, 4).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'span[data-ui-name="ads.price.strong"]'))
                 )
                 raw_price = price_el.text.strip()
+                log_msg(f"[{name}] 📝 Roher Preis-Text von Webseite: '{raw_price}'")
                 
-                # OBI Schweiz Formatierung fixen (Entfernt Striche und Apostrophe)
                 clean_p = re.sub(r'[-–—]', '00', raw_price)
                 clean_p = clean_p.replace("'", "").replace("’", "")
                 
@@ -244,18 +277,22 @@ def check_single_item(item, proxy_pool):
                 if match:
                     final_price_str = match.group(1).replace(',', '.')
                     current_price = float(final_price_str)
-                    log_msg(f"✅ Preis für {item['name']} gesichert: {current_price} CHF")
+                    log_msg(f"[{name}] ✅ Erfolgreich bereinigt! Aktueller Preis: {current_price} CHF")
                     
                     update_item_db(item["id"], current_price=current_price)
                     log_price_history(item["id"], current_price)
+                else:
+                    log_msg(f"[{name}] ❌ Konnte keine Zahlen im Text '{clean_p}' finden.")
             except Exception as e:
-                log_msg(f"⚠️ Preis-Element bei {item['name']} nicht rechtzeitig gefunden. Mache weiter...")
+                log_msg(f"[{name}] ⚠️ Preis-Element Timeout (Kein Preis gefunden). Mache weiter...")
             
-            # 3. SCROLLEN & FILIAL-VERFÜGBARKEIT IN DEN VORDERGRUND HOLEN
+            # 3. SCROLLEN & FILIAL-VERFÜGBARKEIT
+            log_msg(f"[{name}] 📜 Scrolle auf der Seite nach unten...")
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/3);")
             time.sleep(1)
             
             try:
+                log_msg(f"[{name}] 🏬 Suche nach Verfügbarkeits-Buttons ('Märkten', 'Filiale')...")
                 buttons = driver.find_elements(By.TAG_NAME, "button") + driver.find_elements(By.TAG_NAME, "a")
                 for btn in buttons:
                     text = btn.text.lower()
@@ -263,60 +300,78 @@ def check_single_item(item, proxy_pool):
                         driver.execute_script("arguments[0].scrollIntoView(true);", btn)
                         time.sleep(1)
                         driver.execute_script("arguments[0].click();", btn)
-                        log_msg(f"🔘 Filial-Menü für {item['name']} geöffnet.")
+                        log_msg(f"[{name}] 🔘 Klick auf Filial-Verfügbarkeit erfolgreich!")
                         time.sleep(4) 
                         break
-            except: pass
+            except Exception as e: 
+                log_msg(f"[{name}] ℹ️ Kein spezifischer Filial-Button klickbar.")
                 
-            # 4. BEWEISFOTO & VERFÜGBARKEIT PRÜFEN
+            # 4. BEWEISFOTO & TEXT PRÜFEN
             debug_path = os.path.join(DATA_DIR, f"debug_{item['id']}.png")
             driver.save_screenshot(debug_path)
+            log_msg(f"[{name}] 📸 Debug-Screenshot gespeichert.")
             
+            log_msg(f"[{name}] 📝 Lese kompletten Text der Webseite aus...")
             raw_text = driver.find_element(By.TAG_NAME, "body").text.lower()
             body_text = " ".join(raw_text.split())
+            
+            log_msg(f"[{name}] 🧹 Filtere Negativ-Worte (z.B. 'momentan nicht verfügbar')...")
             body_text = body_text.replace("keine lieferung", "xxx").replace("keine abholung", "xxx").replace("in keinem markt", "xxx").replace("0 stück", "xxx")
             
             keywords = ["in den warenkorb", "lieferung möglich", "im markt verfügbar", "märkten verfügbar", "stück verfügbar", "stück vorrätig", "reservieren & abholen", "filiale verfügbar"]
             
-            is_available = any(k in body_text for k in keywords)
-            trigger_type = "none"
+            is_available = False
+            for k in keywords:
+                if k in body_text:
+                    log_msg(f"[{name}] 🎯 TREFFER! Positives Keyword gefunden: '{k}'")
+                    is_available = True
+                    break
             
+            trigger_type = "none"
             if is_available:
                 trigger_type = "available"
             elif current_price and item.get("target_price"):
+                log_msg(f"[{name}] ⚖️ Vergleiche Preis ({current_price}) mit Ziel ({item['target_price']})...")
                 if current_price <= item["target_price"]:
                     trigger_type = "price_drop"
 
             if trigger_type != "none":
+                log_msg(f"[{name}] 🚨 ALARM WIRD AUSGELÖST! Grund: {trigger_type.upper()}")
                 screenshot_path = os.path.join(DATA_DIR, f"screenshot_{item['id']}.png")
                 driver.save_screenshot(screenshot_path)
                 update_item_db(item["id"], has_screenshot=1, screenshot_time=time.time(), found_time=time.time())
                 
                 if trigger_type == "available":
                     update_item_db(item["id"], status="✅ VERFÜGBAR!")
-                    send_pushover(f"Artikel {item['name']} verfügbar!", item["url"], screenshot_path)
+                    send_pushover(f"Artikel {name} verfügbar!", item["url"], screenshot_path)
                 else:
                     update_item_db(item["id"], status=f"📉 PREIS-STURZ ({current_price} CHF)")
-                    send_pushover(f"Preis-Alarm! {item['name']} ist auf {current_price} CHF gefallen!", item["url"], screenshot_path, "📉 Preis-Alarm")
+                    send_pushover(f"Preis-Alarm! {name} ist auf {current_price} CHF gefallen!", item["url"], screenshot_path, "📉 Preis-Alarm")
             else:
+                log_msg(f"[{name}] ❌ Weder verfügbar noch Preis-Limit unterschritten.")
                 update_item_db(item["id"], status="❌ Nicht verfügbar / Preis zu hoch.")
                 
+            log_msg(f"[{name}] 🧹 Räume auf: Beende Browser...")
             driver.quit()
             success = True
+            log_msg(f"[{name}] ✨ DURCHLAUF ERFOLGREICH BEENDET.")
             break 
             
         except Exception as e:
+            log_msg(f"[{name}] 💥 FEHLER in Versuch {attempt+1}: Verbindung abgebrochen oder Timeout.")
             try: driver.quit()
             except: pass
             if current_proxy and current_proxy in proxy_pool:
                 proxy_pool.remove(current_proxy)
+                log_msg(f"[PROXY] Defekter Proxy '{current_proxy}' aus dem Pool entfernt.")
     
     if not success:
-        log_msg(f"❌ {item['name']} nach {max_retries} Versuchen fehlgeschlagen.")
+        log_msg(f"[{name}] 💀 ABBRUCH nach {max_retries} gescheiterten Versuchen.")
         update_item_db(item["id"], status="⚠️ Fehler (Proxys tot)")
 
 # --- Minütlicher Check Loop ---
 def tracker_loop():
+    log_msg("[SYSTEM] 🟢 Tracker-Thread gestartet. System läuft.")
     while not stop_event.is_set():
         items = get_items()
         to_check = []
@@ -329,8 +384,8 @@ def tracker_loop():
                     to_check.append(i)
         
         if to_check:
+            log_msg(f"[SYSTEM] ⏰ Es sind {len(to_check)} Artikel fällig. Starte Prüf-Runde...")
             proxy_pool = load_proxies()
-            log_msg(f"▶️ Starte paralleles Scraping für {len(to_check)} fällige Artikel...")
             
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = []
@@ -342,6 +397,9 @@ def tracker_loop():
                 for f in futures:
                     if stop_event.is_set(): break
                     f.result() 
+            log_msg("[SYSTEM] ✅ Prüf-Runde komplett abgeschlossen.")
+        else:
+            log_msg("[SYSTEM] 💤 Kein Artikel fällig. Warte...")
                 
         STATE["status"] = "Warte auf nächste Intervalle..."
         stop_event.wait(60) 
@@ -360,7 +418,8 @@ HTML_TEMPLATE = """
     <style>
         .screenshot-thumb { max-height: 100px; cursor: pointer; transition: 0.3s; }
         .screenshot-thumb:hover { opacity: 0.8; }
-        #terminalLog { background-color: #1e1e1e; color: #00ff00; font-family: monospace; font-size: 13px; resize: none; border: 1px solid #333; }
+        /* NEU: Terminal etwas größer für VERY VERBOSE */
+        #terminalLog { background-color: #1e1e1e; color: #00ff00; font-family: 'Courier New', monospace; font-size: 13px; resize: none; border: 1px solid #333; line-height: 1.2; }
         .inactive-row { opacity: 0.6; background-color: #f8f9fa; }
     </style>
 </head>
@@ -381,11 +440,12 @@ HTML_TEMPLATE = """
     <!-- Live Terminal -->
     <div class="card shadow-sm mb-4 border-dark">
         <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center py-2">
-            <span class="mb-0">📜 Live-Terminal (Bot-Status)</span>
-            <span class="spinner-grow spinner-grow-sm text-success" role="status" aria-hidden="true" style="{{ 'display:none;' if not state.is_running else '' }}"></span>
+            <span class="mb-0">📜 Live-Terminal (Very Verbose Mode)</span>
+            <span class="spinner-border spinner-border-sm text-success" role="status" aria-hidden="true" style="{{ 'display:none;' if not state.is_running else '' }}"></span>
         </div>
         <div class="card-body p-0">
-            <textarea id="terminalLog" class="form-control rounded-0 border-0" rows="5" readonly>Warte auf Verbindung...</textarea>
+            <!-- ROWS erhöht für bessere Übersicht -->
+            <textarea id="terminalLog" class="form-control rounded-0 border-0 p-3" rows="12" readonly>Warte auf Verbindung...</textarea>
         </div>
     </div>
 
@@ -530,12 +590,15 @@ HTML_TEMPLATE = """
     function updateTerminal() {
         fetch('/api/logs').then(res => res.json()).then(data => {
             const t = document.getElementById('terminalLog');
-            const scroll = t.scrollHeight - t.clientHeight <= t.scrollTop + 1;
+            // Prüft, ob der User manuell hochgescrollt hat
+            const scroll = t.scrollHeight - t.clientHeight <= t.scrollTop + 5;
             t.value = data.length > 0 ? data.join('\\n') : "System bereit.";
+            // Scrollt nur automatisch nach unten, wenn wir eh schon unten waren
             if (scroll) t.scrollTop = t.scrollHeight;
         });
     }
-    setInterval(updateTerminal, 2000); updateTerminal();
+    // Lade-Intervall auf 1 Sekunde für direkteres Feedback
+    setInterval(updateTerminal, 1000); updateTerminal();
 
     let myChart = null;
     const chartModal = new bootstrap.Modal(document.getElementById('chartModal'));
@@ -595,7 +658,7 @@ def save_settings_route():
     for k in ["pushover_user", "pushover_token", "pushover_priority", "proxies", "proxy_url"]:
         set_setting(k, request.form.get(k, ""))
     set_setting("require_proxy", "1" if "require_proxy" in request.form else "0")
-    log_msg("System-Einstellungen gespeichert.")
+    log_msg("[SYSTEM] Einstellungen im Web-Dashboard aktualisiert.")
     return redirect(url_for("index"))
 
 @app.route("/add", methods=["POST"])
@@ -611,7 +674,7 @@ def add_item_route():
                   (item_id, request.form["name"], request.form["url"], float(tp) if tp else None, int(ci), "Wartet auf Check..."))
         conn.commit()
         conn.close()
-    log_msg(f"Neuer Artikel hinzugefügt: {request.form['name']} (Intervall: {ci} Min)")
+    log_msg(f"[SYSTEM] Neuer Artikel angelegt: {request.form['name']} (Intervall: {ci} Min)")
     return redirect(url_for("index"))
 
 @app.route("/delete/<item_id>")
@@ -624,6 +687,7 @@ def delete_item_route(item_id):
         conn.close()
     img = os.path.join(DATA_DIR, f"screenshot_{item_id}.png")
     if os.path.exists(img): os.remove(img)
+    log_msg(f"[SYSTEM] Ein Artikel wurde gelöscht.")
     return redirect(url_for("index"))
 
 @app.route("/toggle/<item_id>")
@@ -631,16 +695,21 @@ def toggle_item_route(item_id):
     with db_lock:
         conn = get_db()
         c = conn.cursor()
-        c.execute("SELECT is_active FROM items WHERE id = ?", (item_id,))
-        current = c.fetchone()["is_active"]
-        c.execute("UPDATE items SET is_active = ? WHERE id = ?", (0 if current == 1 else 1, item_id))
+        c.execute("SELECT is_active, name FROM items WHERE id = ?", (item_id,))
+        row = c.fetchone()
+        current = row["is_active"]
+        name = row["name"]
+        new_status = 0 if current == 1 else 1
+        c.execute("UPDATE items SET is_active = ? WHERE id = ?", (new_status, item_id))
         conn.commit()
         conn.close()
+    log_msg(f"[SYSTEM] Artikel '{name}' wurde {'AKTIVIERT' if new_status == 1 else 'PAUSIERT'}.")
     return redirect(url_for("index"))
 
 @app.route("/reset_cooldown/<item_id>")
 def reset_cooldown_route(item_id):
     update_item_db(item_id, found_time=0, status="Wartet auf Check...", has_screenshot=0)
+    log_msg("[SYSTEM] Cooldown für einen Artikel zurückgesetzt.")
     return redirect(url_for("index"))
 
 @app.route("/screenshot/<item_id>")
@@ -661,7 +730,6 @@ def start():
         tracker_thread = threading.Thread(target=tracker_loop, daemon=True)
         tracker_thread.start()
         STATE["is_running"] = True
-        log_msg("Tracker manuell GESTARTET.")
     return redirect(url_for("index"))
 
 @app.route("/stop")
@@ -670,7 +738,7 @@ def stop():
         stop_event.set()
         STATE["is_running"] = False
         STATE["status"] = "Gestoppt"
-        log_msg("Tracker manuell GESTOPPT.")
+        log_msg("[SYSTEM] 🛑 Tracker-Prozess manuell gestoppt!")
     return redirect(url_for("index"))
 
 @app.route("/test")
